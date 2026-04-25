@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-join_caiso_datasets.py
+merge_collected_data.py
 
 Combine raw CAISO dataset CSVs into one long processed CSV.
 

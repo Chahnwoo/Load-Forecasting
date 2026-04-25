@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-collect_caiso_dataset.py
+collect_caiso_dataset_gridstatus_dotenv.py
 
 Hourly data collection pipeline (MODULAR) for CAISO-related regions:
   regions = ['caiso', 'pge', 'sce', 'sdge', 'vea', 'mwd']
@@ -36,24 +36,24 @@ Dependencies:
   pip install gridstatusio
 
 Usage:
-  python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07
+  python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07
 
 If station weights CSV is missing and you want fallback behavior:
-  python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-fallback
+  python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-fallback
 
 If you want the script to continue even when some requested regions have no load column:
-  python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-missing-load-regions
+  python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-missing-load-regions
 
 To use GridStatus as a fallback for recent/missing CAISO load data:
   # Create a local .env file containing:
   # GRIDSTATUS_API_KEY=your_key_here
-  python collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --load-source caiso_then_gridstatus
+  python src/data_collection/collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --load-source caiso_then_gridstatus
 
 You can also point to a non-default environment file:
-  python collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --env-file ./secrets/.env
+  python src/data_collection/collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --env-file ./secrets/.env
 
 To use GridStatus first and skip the CAISO XLSX scrape unless GridStatus fails:
-  python collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --load-source gridstatus_then_caiso
+  python src/data_collection/collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --load-source gridstatus_then_caiso
 """
 
 from __future__ import annotations

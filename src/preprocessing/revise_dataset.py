@@ -11,7 +11,7 @@ New columns:
     load_previous_week
 
 Output:
-    data/revised_caiso_dataset_20200101_to_20260421.csv
+    data/processed/revised_caiso_dataset_20200101_to_20260421.csv
 """
 
 from pathlib import Path
@@ -26,8 +26,8 @@ from pandas.tseries.holiday import (
 from pandas.tseries.offsets import DateOffset
 from pandas.tseries.holiday import MO, TH
 
-INPUT_FILE = "data/caiso_dataset_20200101_to_20260421.csv"
-OUTPUT_FILE = "data/revised_caiso_dataset_20200101_to_20260421.csv"
+INPUT_FILE = "data/processed/caiso_dataset_20200101_to_20260421.csv"
+OUTPUT_FILE = "data/processed/revised_caiso_dataset_20200101_to_20260421.csv"
 
 
 # -----------------------------
