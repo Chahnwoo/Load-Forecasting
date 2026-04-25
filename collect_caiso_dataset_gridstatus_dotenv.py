@@ -1353,7 +1353,7 @@ def save_outputs(
     *,
     start_date: date,
     end_date: date,
-    out_dir: str = "./data",
+    out_dir: str = "./data/raw",
 ) -> Tuple[str, str]:
     ensure_dir(out_dir)
 

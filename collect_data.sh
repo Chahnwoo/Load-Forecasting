@@ -1,1 +1,1 @@
-python collect_caiso_dataset.py --start 2026-01-01 --end 2026-04-21 --allow-missing-load-regions
+python collect_caiso_dataset.py --start 2026-01-05 --end 2026-01-06 --allow-missing-load-regions
