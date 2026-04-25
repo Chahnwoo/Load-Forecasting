@@ -12,8 +12,15 @@ New columns:
 
 Output:
     data/processed/revised_caiso_dataset_20200101_to_20260421.csv
+
+Usage:
+    python src/preprocessing/revise_dataset.py
+    python src/preprocessing/revise_dataset.py \
+        --input data/processed/caiso_dataset_20200101_to_20260425.csv \
+        --output data/processed/revised_caiso_dataset_20200101_to_20260425.csv
 """
 
+import argparse
 from pathlib import Path
 import pandas as pd
 from pandas.tseries.holiday import (
@@ -93,9 +100,27 @@ class CaliforniaHolidayCalendar(AbstractHolidayCalendar):
 # -----------------------------
 # Main Feature Builder
 # -----------------------------
-def main():
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Add weekend/holiday/load_previous_week features to a merged CAISO dataset."
+    )
+    parser.add_argument(
+        "--input",
+        default=INPUT_FILE,
+        help=f"Input merged dataset path (default: {INPUT_FILE})",
+    )
+    parser.add_argument(
+        "--output",
+        default=OUTPUT_FILE,
+        help=f"Output revised dataset path (default: {OUTPUT_FILE})",
+    )
+    return parser.parse_args()
 
-    df = pd.read_csv(INPUT_FILE)
+
+def main():
+    args = parse_args()
+
+    df = pd.read_csv(args.input)
 
     df["time_utc"] = pd.to_datetime(df["time_utc"])
 
@@ -154,12 +179,13 @@ def main():
     # -----------------------------
     # Save dataset
     # -----------------------------
-    Path("data").mkdir(exist_ok=True)
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    df.to_csv(OUTPUT_FILE, index=False)
+    df.to_csv(output_path, index=False)
 
     print("Saved to:")
-    print(OUTPUT_FILE)
+    print(output_path)
 
 
 if __name__ == "__main__":
