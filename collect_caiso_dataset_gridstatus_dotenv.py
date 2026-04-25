@@ -31,7 +31,7 @@ Main fixes in this rewrite:
    - prints missing-load summaries before writing output
 
 Dependencies:
-  pip install pandas requests openpyxl numpy
+  pip install pandas requests openpyxl numpy python-dotenv
   # Optional but recommended for recent CAISO TAC load fallback:
   pip install gridstatusio
 
@@ -45,8 +45,12 @@ If you want the script to continue even when some requested regions have no load
   python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-missing-load-regions
 
 To use GridStatus as a fallback for recent/missing CAISO load data:
-  export GRIDSTATUS_API_KEY="your_key_here"
+  # Create a local .env file containing:
+  # GRIDSTATUS_API_KEY=your_key_here
   python collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --load-source caiso_then_gridstatus
+
+You can also point to a non-default environment file:
+  python collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --env-file ./secrets/.env
 
 To use GridStatus first and skip the CAISO XLSX scrape unless GridStatus fails:
   python collect_caiso_dataset.py --start 2025-01-01 --end 2026-04-30 --load-source gridstatus_then_caiso
@@ -204,6 +208,7 @@ LOAD_COLUMN_ALIASES: Dict[str, str] = {
 
 GRIDSTATUS_DATASET = "caiso_load_hourly"
 GRIDSTATUS_API_KEY_ENV = "GRIDSTATUS_API_KEY"
+DEFAULT_ENV_FILE = ".env"
 
 # GridStatus caiso_load_hourly uses TAC area names like PGE-TAC, SCE-TAC, etc.
 GRIDSTATUS_TAC_AREA_ALIASES: Dict[str, str] = {
@@ -825,6 +830,38 @@ def _merge_workbook_parts(parts: List[pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
+def load_dotenv_file(env_file: Optional[str] = DEFAULT_ENV_FILE) -> None:
+    """
+    Load environment variables from a .env file, if available.
+
+    This keeps secrets like GRIDSTATUS_API_KEY out of the script and out of
+    shell history. Existing environment variables are not overwritten, so values
+    exported in your terminal still take precedence over the .env file.
+    """
+    if not env_file:
+        return
+
+    if not os.path.exists(env_file):
+        print(f"[dotenv] no {env_file} file found; using existing environment variables only")
+        return
+
+    try:
+        from dotenv import load_dotenv
+    except ImportError as e:
+        raise RuntimeError(
+            "Missing dependency: python-dotenv is required to load API keys from a .env file.\n"
+            "Install it with:\n"
+            "  pip install python-dotenv\n"
+            "Or set GRIDSTATUS_API_KEY directly in your shell environment."
+        ) from e
+
+    loaded = load_dotenv(dotenv_path=env_file, override=False)
+    if loaded:
+        print(f"[dotenv] loaded environment variables from {env_file}")
+    else:
+        print(f"[dotenv] checked {env_file}, but no variables were loaded")
+
+
 def _get_gridstatus_client(api_key: Optional[str] = None):
     """
     Construct a GridStatus.io client lazily so the base pipeline does not require
@@ -837,13 +874,14 @@ def _get_gridstatus_client(api_key: Optional[str] = None):
             "Missing optional dependency: gridstatusio is required for GridStatus load fallback.\n"
             "Install it with:\n"
             "  pip install gridstatusio\n"
-            f"Then set your API key with:\n  export {GRIDSTATUS_API_KEY_ENV}=your_key_here"
+            f"Then put your API key in .env as:\n  {GRIDSTATUS_API_KEY_ENV}=your_key_here"
         ) from e
 
     key = api_key or os.environ.get(GRIDSTATUS_API_KEY_ENV)
     if not key:
         raise RuntimeError(
-            f"GridStatus API key not found. Set {GRIDSTATUS_API_KEY_ENV} or pass --gridstatus-api-key."
+            f"GridStatus API key not found. Add {GRIDSTATUS_API_KEY_ENV}=your_key_here to .env, "
+            f"set {GRIDSTATUS_API_KEY_ENV} in your shell, or pass --gridstatus-api-key."
         )
 
     # gridstatusio has had a few constructor signatures over time. Try the most
@@ -1367,9 +1405,22 @@ def main() -> None:
     ap.add_argument(
         "--gridstatus-api-key",
         default=None,
-        help=f"GridStatus.io API key. Prefer setting {GRIDSTATUS_API_KEY_ENV} instead of passing this on the command line.",
+        help=(
+            f"GridStatus.io API key. Prefer putting {GRIDSTATUS_API_KEY_ENV}=... in .env "
+            "instead of passing this on the command line."
+        ),
+    )
+    ap.add_argument(
+        "--env-file",
+        default=DEFAULT_ENV_FILE,
+        help=(
+            "Path to dotenv file used to load environment variables before GridStatus is called. "
+            f"Default: {DEFAULT_ENV_FILE}"
+        ),
     )
     args = ap.parse_args()
+
+    load_dotenv_file(args.env_file)
 
     start_date = parse_yyyy_mm_dd(args.start)
     end_date = parse_yyyy_mm_dd(args.end)
