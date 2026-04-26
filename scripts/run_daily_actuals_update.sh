@@ -18,6 +18,8 @@ echo "[1/5] Collecting CAISO/GridStatus daily data into data/raw..."
 "$PYTHON_BIN" src/data_collection/collect_caiso_dataset_gridstatus_dotenv.py \
   --start "$YESTERDAY" \
   --end "$YESTERDAY" \
+  --load-source caiso_then_gridstatus \
+  --env-file .env \
   --out-dir data/raw
 
 echo "[2/5] Merging collected raw datasets into data/processed..."
