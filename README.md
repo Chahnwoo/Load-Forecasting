@@ -40,11 +40,13 @@ source .venv/bin/activate
 
 ### 2) Install dependencies
 
+Use an explicit package install command (safer than `-r requirements.txt` here):
+
 ```bash
-pip install -r requirements.txt
+pip install pandas numpy requests openpyxl python-dotenv gridstatusio scikit-learn tqdm matplotlib xgboost
 ```
 
-> Note: `requirements.txt` is in a **pip-freeze-style table format** (`Package Version` columns), not a minimal hand-curated requirements list.
+> Note: `requirements.txt` currently appears to be an **environment snapshot** (pip-freeze-style table with `Package` / `Version` columns), not a standard pip requirements file that is always directly installable with `pip install -r`.
 
 ### 3) Configure `.env` for GridStatus fallback
 
@@ -90,19 +92,22 @@ python src/preprocessing/merge_collected_data.py \
   --processed-dir data/processed
 ```
 
+`merge_collected_data.py` automatically infers the merged filename from the raw files it finds (for example `caiso_dataset_<START>_to_<END>.csv`).
+Use the **printed output path** from this step as the `--input` to `revise_dataset.py`.
+
 ### 2) Add calendar + lag features (`load_previous_week`)
 
 ```bash
 python src/preprocessing/revise_dataset.py \
-  --input data/processed/caiso_dataset_20200101_to_20260421.csv \
-  --output data/processed/revised_caiso_dataset_20200101_to_20260421.csv
+  --input data/processed/caiso_dataset_<START>_to_<END>.csv \
+  --output data/processed/revised_caiso_dataset_<START>_to_<END>.csv
 ```
 
 ### 3) Filter to rows with required target + lag
 
 ```bash
 python src/preprocessing/filter_dataset.py \
-  data/processed/revised_caiso_dataset_20200101_to_20260421.csv
+  data/processed/revised_caiso_dataset_<START>_to_<END>.csv
 ```
 
 This writes `data/processed/filtered.csv`.
@@ -111,8 +116,8 @@ This writes `data/processed/filtered.csv`.
 
 ```bash
 python src/preprocessing/add_hour_indicators.py \
-  data/processed/revised_caiso_dataset_20200101_to_20260421.csv \
-  --output_csv data/processed/revised_caiso_dataset_20200101_to_20260421_hours.csv
+  data/processed/revised_caiso_dataset_<START>_to_<END>.csv \
+  --output_csv data/processed/revised_caiso_dataset_<START>_to_<END>_hours.csv
 ```
 
 ## Training
@@ -224,10 +229,10 @@ python src/data_collection/collect_caiso_dataset_gridstatus_dotenv.py --start 20
 python src/preprocessing/merge_collected_data.py --raw-dir data/raw --processed-dir data/processed
 
 # 3) Revise
-python src/preprocessing/revise_dataset.py --input data/processed/caiso_dataset_20200101_to_20260421.csv --output data/processed/revised_caiso_dataset_20200101_to_20260421.csv
+python src/preprocessing/revise_dataset.py --input data/processed/caiso_dataset_<START>_to_<END>.csv --output data/processed/revised_caiso_dataset_<START>_to_<END>.csv
 
 # 4) Filter
-python src/preprocessing/filter_dataset.py data/processed/revised_caiso_dataset_20200101_to_20260421.csv
+python src/preprocessing/filter_dataset.py data/processed/revised_caiso_dataset_<START>_to_<END>.csv
 
 # 5) Train monthly batch
 bash scripts/train_forecasters.sh
