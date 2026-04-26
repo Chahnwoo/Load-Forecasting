@@ -2,9 +2,9 @@
 
 set -euo pipefail
 
-CSV_PATH="filtered.csv"
-SCRIPT_PATH="train_forecaster.py"
-OUTPUT_DIR="model_runs"
+CSV_PATH="data/processed/filtered.csv"
+SCRIPT_PATH="src/modeling/train_forecaster.py"
+OUTPUT_DIR="outputs/model_runs"
 
 mkdir -p "${OUTPUT_DIR}"
 

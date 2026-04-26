@@ -14,13 +14,13 @@ echo "Running daily actuals update"
 echo "Date: ${YESTERDAY}"
 echo "============================================================"
 
-"$PYTHON" collect_caiso_dataset_gridstatus_dotenv.py \
+"$PYTHON" src/data_collection/collect_caiso_dataset_gridstatus_dotenv.py \
   --start "$YESTERDAY" \
   --end "$YESTERDAY" \
   --load-source caiso_then_gridstatus \
   --env-file "$PROJECT_DIR/.env" \
   --out-dir "$PROJECT_DIR/data/raw"
 
-"$PYTHON" join_caiso_datasets.py \
+"$PYTHON" src/preprocessing/merge_collected_data.py \
   --raw-dir "$PROJECT_DIR/data/raw" \
   --processed-dir "$PROJECT_DIR/data/processed"

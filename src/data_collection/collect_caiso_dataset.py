@@ -48,10 +48,10 @@
 #   pip install pandas requests openpyxl
 
 # Usage:
-#   python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07
+#   python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07
 
 # If weights CSV is missing and you want fallback behavior:
-#   python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-fallback
+#   python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-fallback
 # """
 
 # from __future__ import annotations
@@ -901,13 +901,13 @@ Dependencies:
   pip install pandas requests openpyxl numpy
 
 Usage:
-  python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07
+  python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07
 
 If station weights CSV is missing and you want fallback behavior:
-  python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-fallback
+  python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-fallback
 
 If you want the script to continue even when some requested regions have no load column:
-  python collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-missing-load-regions
+  python src/data_collection/collect_caiso_dataset.py --start 2024-01-01 --end 2024-01-07 --allow-missing-load-regions
 """
 
 from __future__ import annotations

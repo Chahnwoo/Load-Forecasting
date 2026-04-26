@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from pathlib import Path
 import pandas as pd
 
 
@@ -59,8 +60,8 @@ def main():
     parser.add_argument(
         "-o",
         "--output_csv",
-        default="with_hour_indicators.csv",
-        help="Path to output CSV file (default: with_hour_indicators.csv)"
+        default="data/processed/with_hour_indicators.csv",
+        help="Path to output CSV file (default: data/processed/with_hour_indicators.csv)"
     )
 
     args = parser.parse_args()
@@ -97,8 +98,11 @@ def main():
 
     df = add_hour_indicators(df)
 
-    df.to_csv(args.output_csv, index=False)
-    print(f"Saved updated dataset to: {args.output_csv}")
+    output_path = Path(args.output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(output_path, index=False)
+    print(f"Saved updated dataset to: {output_path}")
 
 
 if __name__ == "__main__":

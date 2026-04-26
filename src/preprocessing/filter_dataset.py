@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 import pandas as pd
 
 
@@ -11,9 +12,11 @@ def filter_rows(input_file: str) -> None:
         raise ValueError(f"Missing required columns: {sorted(missing)}")
 
     filtered = df.dropna(subset=["load_mw", "load_previous_week"]).copy()
-    filtered.to_csv("filtered.csv", index=False)
+    output_file = Path("data/processed/filtered.csv")
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    filtered.to_csv(output_file, index=False)
 
-    print("Saved filtered dataset to filtered.csv")
+    print(f"Saved filtered dataset to {output_file}")
     print(f"Original rows: {len(df):,}")
     print(f"Filtered rows: {len(filtered):,}")
     print(f"Dropped rows: {len(df) - len(filtered):,}")
@@ -21,7 +24,7 @@ def filter_rows(input_file: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: python filter_dataset.py path/to/dataset.csv")
+        print("Usage: python src/preprocessing/filter_dataset.py path/to/dataset.csv")
         sys.exit(1)
 
     filter_rows(sys.argv[1])
