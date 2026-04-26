@@ -1418,6 +1418,11 @@ def main() -> None:
             f"Default: {DEFAULT_ENV_FILE}"
         ),
     )
+    ap.add_argument(
+        "--out-dir",
+        default="./data/raw",
+        help="Directory where output CSVs should be written. Default: ./data/raw",
+    )
     args = ap.parse_args()
 
     load_dotenv_file(args.env_file)
@@ -1451,6 +1456,7 @@ def main() -> None:
         station_meta,
         start_date=start_date,
         end_date=end_date,
+        out_dir=args.out_dir,
     )
 
     print(f"\nSaved dataset: {p1}")
