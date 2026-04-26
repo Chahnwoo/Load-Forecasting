@@ -1017,6 +1017,15 @@ def _standardize_gridstatus_load_frame(raw: pd.DataFrame) -> pd.DataFrame:
         .rename_axis(columns=None)
     )
 
+    # GridStatus caiso_load_hourly may expose only TAC-area rows (for example
+    # PGE/SCE/SDGE/VEA/MWD) without a separate total CAISO column. When that
+    # happens, synthesize `caiso` as the sum of the available TAC-area load
+    # columns so downstream region selection can still use the CAISO total.
+    if "caiso" not in wide.columns:
+        tac_cols = [c for c in ["pge", "sce", "sdge", "vea", "mwd"] if c in wide.columns]
+        if tac_cols:
+            wide["caiso"] = wide[tac_cols].sum(axis=1, skipna=True, min_count=1)
+
     keep = ["time_utc"] + [c for c in CANONICAL_LOAD_COLS if c in wide.columns]
     return wide[keep].sort_values("time_utc").reset_index(drop=True)
 
