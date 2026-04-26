@@ -1036,13 +1036,24 @@ def collect_gridstatus_load(
     """
     client = _get_gridstatus_client(api_key)
 
+    # CLI --start/--end are inclusive dates, but GridStatus dataset queries treat
+    # `end` as an exclusive boundary. Query one extra day, then slice back to the
+    # original inclusive UTC hourly index below.
+    gridstatus_start_date = start_date
+    gridstatus_end_date = end_date + timedelta(days=1)
+
     if debug:
-        print(f"[gridstatus_load] fetching dataset={GRIDSTATUS_DATASET} start={start_date} end={end_date}")
+        print(
+            "[gridstatus_load] fetching "
+            f"dataset={GRIDSTATUS_DATASET} "
+            f"request_start={start_date} request_end_inclusive={end_date} "
+            f"query_start={gridstatus_start_date} query_end_exclusive={gridstatus_end_date}"
+        )
 
     raw = client.get_dataset(
         dataset=GRIDSTATUS_DATASET,
-        start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d"),
+        start=gridstatus_start_date.strftime("%Y-%m-%d"),
+        end=gridstatus_end_date.strftime("%Y-%m-%d"),
         timezone="market",
     )
 
