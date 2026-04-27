@@ -21,7 +21,9 @@ Computed per-region using grouped shift/rolling operations:
 | Feature | Computation | Purpose |
 |---|---|---|
 | `load_lag_24h` | `load_mw.shift(24)` per region | Same hour yesterday |
-| `load_24h_avg` | `load_mw.rolling(24).mean()` per region | Smoothed recent demand |
+| `load_24h_avg` | `load_mw.shift(1).rolling(24).mean()` per region | Smoothed recent demand using only prior hours |
+
+Lag features are computed after concatenating the train and validation split, then split back apart. This gives validation rows access to historical training rows at the month boundary without using the current row's target as a feature.
 
 ### Existing features used
 
@@ -38,8 +40,6 @@ Computed per-region using grouped shift/rolling operations:
 | `cloud_cover` | weather data | linear `l()` |
 | `wind_speed_10m` | weather data | linear `l()` |
 | `precipitation` | weather data | linear `l()` |
-| `cdd_65f` | weather data | linear `l()` |
-| `hdd_65f` | weather data | linear `l()` |
 | `is_weekend` | revise_dataset.py | linear `l()` |
 | `US_federal_holidays` | revise_dataset.py | linear `l()` |
 | `state_holidays` | revise_dataset.py | linear `l()` |
@@ -49,6 +49,7 @@ Computed per-region using grouped shift/rolling operations:
 ### Features NOT used by GAM
 
 - `apparent_temperature` — too correlated with `temperature_2m`; would cause concurvity issues in GAM
+- `cdd_65f`, `hdd_65f` — deterministic transforms of `temperature_2m`; the temperature spline already captures heating/cooling nonlinearities
 - `hour_sin`, `hour_cos`, `doy_sin`, `doy_cos` — replaced by cyclic spline terms on raw `hour` and `day_of_year`
 - One-hot `hour_00`..`hour_23` columns — replaced by the `hour` spline term
 
@@ -63,12 +64,11 @@ load_mw = s(temperature_2m, n_splines=25)
         + s(day_of_year, n_splines=20, basis='cp')  # cyclic
         + l(load_24h_avg)
         + l(relative_humidity_2m) + l(cloud_cover) + l(wind_speed_10m) + l(precipitation)
-        + l(cdd_65f) + l(hdd_65f)
         + l(is_weekend) + l(US_federal_holidays) + l(state_holidays)
         + f(region) + f(day_of_week)
 ```
 
-PyGAM's `LinearGAM` is used (identity link, Gaussian distribution). Smoothing penalty `lam` is set via CLI arg `--gam_lam` (default 0.6). Number of splines via `--gam_n_splines` (default 25).
+PyGAM's `LinearGAM` is used (identity link, Gaussian distribution) on `log1p(load_mw)`, then predictions are transformed back to MW with `expm1()` and clipped at zero. Modeling log-load keeps the single model from being dominated by the largest regions and makes the effects easier to explain as roughly relative or percentage changes. Smoothing penalty `lam` is set via CLI arg `--gam_lam` (default 0.6). Number of splines via `--gam_n_splines` (default 25).
 
 ## Integration Points in `train_forecaster.py`
 
@@ -84,14 +84,15 @@ except ImportError:
     PYGAM_AVAILABLE = False
 ```
 
-### 2. `build_gam_features(df)` — new function
+### 2. `build_gam_features(train_df, valid_df)` — new function
 
-- Groups by region, computes `load_lag_24h` (shift 24) and `load_24h_avg` (rolling 24 mean)
+- Combines train and validation rows before computing lag features, so validation month-boundary rows can use prior training history
+- Groups by region, computes `load_lag_24h` (shift 24) and `load_24h_avg` (prior 24-hour rolling mean)
 - Returns augmented DataFrame
 
 ### 3. `prepare_gam_data(train_df, valid_df)` — new function
 
-- Calls `build_gam_features()` on both splits
+- Calls `build_gam_features()` once across both splits
 - Drops rows with NaN lags
 - Selects GAM feature columns
 - Integer-encodes `region` and ensures proper dtypes
@@ -127,6 +128,7 @@ elif args.model == "gam":
 - Add `"gam"` to `--model` choices
 - Add `--gam_n_splines` (int, default 25)
 - Add `--gam_lam` (float, default 0.6)
+- Add `--gam_max_iter` (int, default 100)
 
 ## Training Script Update
 

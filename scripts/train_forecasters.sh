@@ -75,6 +75,10 @@ do
 
   run_model xgboost "${month}"
 
+  run_model gam "${month}" \
+    --gam_n_splines 25 \
+    --gam_lam 0.6
+
   echo
   echo "Completed all models for ${month}"
 done
