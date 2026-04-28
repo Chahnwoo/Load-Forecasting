@@ -1,0 +1,12 @@
+Paper	Used for	Link
+
+
+Fan & Hyndman (2012)	GAM — semi-parametric additive model; basis for your partner's implementation	doi:10.1109/TPWRS.2011.2162082
+
+Giacomazzi, Haag, Hopf (2023)	TFT — 2.43% MAPE on distribution grid	arXiv:2305.10559
+
+Cavus & Allahham (2025)	ST-CALNet — CNN-Attention-LSTM	doi:10.3390/electronics14132514
+
+Dong et al. (2025)	Survey covering BiLSTM, Transformer, LSTM architectures	arXiv:2408.16202
+
+Nti et al. (2020)	Systematic review covering tree-based methods (XGBoost, RF, LightGBM)	doi:10.1186/s43067-020-00021-8

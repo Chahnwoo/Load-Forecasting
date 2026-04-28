@@ -56,6 +56,12 @@ try:
 except ImportError:
     PYGAM_AVAILABLE = False
 
+try:
+    from prophet import Prophet as _Prophet
+    PROPHET_AVAILABLE = True
+except ImportError:
+    PROPHET_AVAILABLE = False
+
 
 # =============================================================================
 # Utility
@@ -747,6 +753,123 @@ class TorchSequenceRegressor(BaseEstimator, RegressorMixin):
 
 
 # =============================================================================
+# Prophet forecaster — fits one Prophet model per region (Giacomazzi et al. 2023
+# finds per-series models essential; Facebook Prophet handles multi-seasonality)
+# =============================================================================
+
+class ProphetForecaster:
+    """
+    Wraps Facebook Prophet with per-region models and external weather regressors.
+    Fits independently of the sklearn preprocessor — uses raw train_df / valid_df.
+    """
+
+    REGRESSOR_COLS = [
+        "temperature_2m", "apparent_temperature", "relative_humidity_2m",
+        "precipitation", "cloud_cover", "wind_speed_10m", "shortwave_radiation",
+        "cdd_65f", "hdd_65f", "is_weekend", "US_federal_holidays", "state_holidays",
+        "load_previous_week",
+    ]
+
+    def __init__(
+        self,
+        changepoint_prior_scale: float = 0.05,
+        seasonality_prior_scale: float = 10.0,
+        add_regressors: bool = True,
+    ):
+        self.changepoint_prior_scale = changepoint_prior_scale
+        self.seasonality_prior_scale = seasonality_prior_scale
+        self.add_regressors = add_regressors
+        self.models_: dict = {}
+
+    def fit(self, train_df: pd.DataFrame) -> "ProphetForecaster":
+        if not PROPHET_AVAILABLE:
+            raise ImportError("prophet is required. Install with: pip install prophet")
+
+        import logging
+        logging.getLogger("prophet").setLevel(logging.WARNING)
+        logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
+
+        train_df = train_df.sort_values(["region", "time_utc"]).reset_index(drop=True)
+
+        for region in train_df["region"].unique():
+            rdf = train_df[train_df["region"] == region].copy()
+
+            prophet_df = pd.DataFrame({
+                "ds": pd.to_datetime(rdf["time_utc"]),
+                "y": rdf["load_mw"].values,
+            })
+
+            m = _Prophet(
+                yearly_seasonality=True,
+                weekly_seasonality=True,
+                daily_seasonality=True,
+                changepoint_prior_scale=self.changepoint_prior_scale,
+                seasonality_prior_scale=self.seasonality_prior_scale,
+            )
+
+            used_regs = []
+            if self.add_regressors:
+                for reg in self.REGRESSOR_COLS:
+                    if reg in rdf.columns and rdf[reg].notna().any():
+                        prophet_df[reg] = rdf[reg].fillna(rdf[reg].median()).values
+                        m.add_regressor(reg)
+                        used_regs.append(reg)
+
+            m.fit(prophet_df)
+            self.models_[region] = {
+                "model": m,
+                "regressors": used_regs,
+                "train_medians": {r: rdf[r].median() for r in used_regs if r in rdf.columns},
+            }
+
+        return self
+
+    def predict(self, valid_df: pd.DataFrame) -> np.ndarray:
+        valid_df = valid_df.sort_values(["region", "time_utc"]).reset_index(drop=True)
+        preds = np.full(len(valid_df), np.nan)
+
+        for region, info in self.models_.items():
+            m = info["model"]
+            regs = info["regressors"]
+            medians = info["train_medians"]
+
+            mask = (valid_df["region"] == region).values
+            rdf = valid_df[mask]
+
+            future = pd.DataFrame({"ds": pd.to_datetime(rdf["time_utc"])})
+            for reg in regs:
+                if reg in rdf.columns:
+                    future[reg] = rdf[reg].fillna(medians.get(reg, 0)).values
+                else:
+                    future[reg] = medians.get(reg, 0)
+
+            forecast = m.predict(future)
+            preds[mask] = forecast["yhat"].values
+
+        return preds
+
+
+# =============================================================================
+# LightGBM-XGBoost ensemble (Yao et al. 2022, IEEE Access)
+# Averages predictions from both boosting methods; reduces variance.
+# =============================================================================
+
+class LGBMXGBEnsemble(BaseEstimator, RegressorMixin):
+    def __init__(self, lgbm_model, xgb_model, weight: float = 0.5):
+        self.lgbm_model = lgbm_model
+        self.xgb_model = xgb_model
+        self.weight = weight
+
+    def fit(self, X, y):
+        self.lgbm_model.fit(X, y)
+        self.xgb_model.fit(X, y)
+        return self
+
+    def predict(self, X):
+        return self.weight * self.lgbm_model.predict(X) + (1 - self.weight) * self.xgb_model.predict(X)
+
+
+# =============================================================================
 # Model factory
 # =============================================================================
 
@@ -841,6 +964,47 @@ def build_model(args):
             )
         return None
 
+    if args.model == "prophet":
+        if not PROPHET_AVAILABLE:
+            raise ImportError(
+                "prophet is required for --model prophet. Install it with: pip install prophet"
+            )
+        return None  # ProphetForecaster constructed directly in fit_and_predict
+
+    if args.model == "lgbm_xgb":
+        if not LIGHTGBM_AVAILABLE:
+            raise ImportError("LightGBM is required for --model lgbm_xgb. pip install lightgbm")
+        if not XGBOOST_AVAILABLE:
+            raise ImportError("XGBoost is required for --model lgbm_xgb. pip install xgboost")
+        lgbm_m = lgb.LGBMRegressor(
+            n_estimators=args.lgbm_n_estimators,
+            learning_rate=args.lgbm_learning_rate,
+            max_depth=args.lgbm_max_depth,
+            num_leaves=args.lgbm_num_leaves,
+            subsample=args.lgbm_subsample,
+            colsample_bytree=args.lgbm_colsample_bytree,
+            reg_alpha=args.lgbm_reg_alpha,
+            reg_lambda=args.lgbm_reg_lambda,
+            random_state=args.seed,
+            n_jobs=-1,
+            verbose=-1,
+        )
+        xgb_m = XGBRegressor(
+            objective="reg:squarederror",
+            n_estimators=args.xgb_n_estimators,
+            learning_rate=args.xgb_learning_rate,
+            max_depth=args.xgb_max_depth,
+            subsample=args.xgb_subsample,
+            colsample_bytree=args.xgb_colsample_bytree,
+            reg_alpha=args.xgb_reg_alpha,
+            reg_lambda=args.xgb_reg_lambda,
+            min_child_weight=args.xgb_min_child_weight,
+            tree_method=args.xgb_tree_method,
+            random_state=args.seed,
+            n_jobs=-1,
+        )
+        return LGBMXGBEnsemble(lgbm_m, xgb_m, weight=args.ensemble_weight)
+
     raise ValueError(f"Unsupported model: {args.model}")
 
 
@@ -927,7 +1091,7 @@ def fit_and_predict(args, prepared: dict):
     train_df = prepared["train_df"]
     valid_df = prepared["valid_df"]
 
-    if args.model in {"linear", "ridge", "hinge_regression", "xgboost", "random_forest", "lightgbm"}:
+    if args.model in {"linear", "ridge", "hinge_regression", "xgboost", "random_forest", "lightgbm", "lgbm_xgb"}:
         X_train = prepared["X_train"]
         X_valid = prepared["X_valid"]
         y_train = prepared["y_train"]
@@ -966,6 +1130,18 @@ def fit_and_predict(args, prepared: dict):
         eval_valid_df = gam_valid_df.copy()
         eval_y_valid = y_va
         train_df = gam_train_df
+
+    elif args.model == "prophet":
+        prophet_model = ProphetForecaster(
+            changepoint_prior_scale=args.prophet_changepoint_prior_scale,
+            seasonality_prior_scale=args.prophet_seasonality_prior_scale,
+        )
+        prophet_model.fit(train_df)
+        valid_preds = prophet_model.predict(valid_df)
+        valid_preds = np.maximum(valid_preds, 0.0)
+        eval_valid_df = valid_df.copy()
+        eval_y_valid = valid_df["load_mw"].values
+        model = prophet_model
 
     else:
         raise ValueError(f"Unsupported model: {args.model}")
@@ -1057,9 +1233,9 @@ def parse_args():
         default="linear",
         choices=[
             "linear", "ridge", "hinge_regression",
-            "xgboost", "random_forest", "lightgbm",
+            "xgboost", "random_forest", "lightgbm", "lgbm_xgb",
             "lstm", "transformer", "bilstm", "stcalnet",
-            "gam",
+            "gam", "prophet",
         ],
         help="Which model backend to use.",
     )
@@ -1114,6 +1290,13 @@ def parse_args():
     parser.add_argument("--gam_lam", type=float, default=0.6)
     parser.add_argument("--gam_max_iter", type=int, default=100)
 
+    # Prophet
+    parser.add_argument("--prophet_changepoint_prior_scale", type=float, default=0.05)
+    parser.add_argument("--prophet_seasonality_prior_scale", type=float, default=10.0)
+
+    # LightGBM-XGBoost ensemble weight (0=all XGBoost, 1=all LightGBM)
+    parser.add_argument("--ensemble_weight", type=float, default=0.5)
+
     parser.add_argument("--lookback", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=128)
@@ -1160,8 +1343,8 @@ def main():
     )
     progress.update(1)
 
-    if args.model == "gam":
-        print_step("Preparing GAM feature data...")
+    if args.model in {"gam", "prophet"}:
+        print_step(f"Preparing {args.model.upper()} feature data...")
         prepared = {
             "train_df": train_df.sort_values(["region", "time_utc"]).reset_index(drop=True),
             "valid_df": valid_df.sort_values(["region", "time_utc"]).reset_index(drop=True),

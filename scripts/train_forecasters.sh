@@ -79,6 +79,18 @@ do
     --gam_n_splines 25 \
     --gam_lam 0.6
 
+  run_model prophet "${month}" \
+    --prophet_changepoint_prior_scale 0.05 \
+    --prophet_seasonality_prior_scale 10.0
+
+  run_model lgbm_xgb "${month}" \
+    --lgbm_n_estimators 300 \
+    --lgbm_learning_rate 0.05 \
+    --lgbm_num_leaves 31 \
+    --xgb_n_estimators 300 \
+    --xgb_learning_rate 0.05 \
+    --ensemble_weight 0.5
+
   run_model random_forest "${month}" \
     --rf_n_estimators 300
 
