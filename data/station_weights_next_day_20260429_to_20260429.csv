@@ -1,0 +1,31 @@
+region,station_name,latitude,longitude,population_est,population_weight,source
+caiso,Los Angeles,34.0522,-118.2437,7672425.81,0.4773808856970518,stations_population_weights_csv
+caiso,San Diego,32.7157,-117.1611,2938801.13,0.18285318373471454,stations_population_weights_csv
+caiso,San Francisco,37.7749,-122.4194,2606153.78,0.16215575498137255,stations_population_weights_csv
+caiso,Sacramento,38.5816,-121.4944,1916975.5,0.11927485318356544,stations_population_weights_csv
+caiso,Fresno,36.7378,-119.7871,937560.44,0.05833532240329572,stations_population_weights_csv
+pge,Oakland,37.8044,-122.2711,3156809.66,0.2938396122731163,stations_population_weights_csv
+pge,San Francisco,37.7749,-122.4194,2606153.78,0.24258390549885617,stations_population_weights_csv
+pge,San Jose,37.3382,-121.8863,2125809.31,0.19787286871676035,stations_population_weights_csv
+pge,Sacramento,38.5816,-121.4944,1916975.5,0.17843436834169563,stations_population_weights_csv
+pge,Fresno,36.7378,-119.7871,937560.44,0.08726924516957162,stations_population_weights_csv
+sce,Los Angeles,34.0522,-118.2437,7672425.81,0.5471859234220285,stations_population_weights_csv
+sce,Riverside,33.9806,-117.3755,2966642.75,0.21157651997185173,stations_population_weights_csv
+sce,San Bernardino,34.1083,-117.2898,2227525.0,0.15886374847470222,stations_population_weights_csv
+sce,Bakersfield,35.3733,-119.0187,732127.06,0.05221420595116251,stations_population_weights_csv
+sce,Palm Springs,33.8303,-116.5453,422886.08,0.030159602180255103,stations_population_weights_csv
+sdge,Chula Vista,32.6401,-117.0842,3864044.74,0.33418376263988864,stations_population_weights_csv
+sdge,San Diego,32.7157,-117.1611,2938801.13,0.25416362525702957,stations_population_weights_csv
+sdge,El Cajon,32.7948,-116.9625,2602049.91,0.22503953448028222,stations_population_weights_csv
+sdge,Escondido,33.1192,-117.0864,1313162.02,0.11356944712793271,stations_population_weights_csv
+sdge,Oceanside,33.1959,-117.3795,844576.81,0.07304363049486691,stations_population_weights_csv
+vea,Victorville,34.5361,-117.2912,434282.28,0.3259232610851134,stations_population_weights_csv
+vea,Lancaster,34.6868,-118.1542,407329.84,0.30569580179526884,stations_population_weights_csv
+vea,Palmdale,34.5794,-118.1165,401633.17,0.30142052428745586,stations_population_weights_csv
+vea,Ridgecrest,35.6225,-117.6709,45146.93,0.03388218983648451,stations_population_weights_csv
+vea,Barstow,34.8958,-117.0173,44075.67,0.03307822299567751,stations_population_weights_csv
+mwd,Los Angeles,34.0522,-118.2437,7672425.81,0.29916794407967423,stations_population_weights_csv
+mwd,Anaheim,33.8366,-117.9143,5438549.5,0.21206326564538522,stations_population_weights_csv
+mwd,Long Beach,33.7701,-118.1937,5436558.0,0.21198561185303993,stations_population_weights_csv
+mwd,Santa Ana,33.7455,-117.8677,4131706.0,0.16110602046494793,stations_population_weights_csv
+mwd,Riverside,33.9806,-117.3755,2966642.75,0.11567715795695271,stations_population_weights_csv

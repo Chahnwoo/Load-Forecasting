@@ -5,3 +5,15 @@ __pycache__/
 *.pyc
 *.pem
 *.key
+.env
+*.env
+logs/
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+outputs/model_runs/*
+!outputs/model_runs/.gitkeep
+.venv/
+__pycache__/
+.DS_Store

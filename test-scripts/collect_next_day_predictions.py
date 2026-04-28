@@ -49,8 +49,14 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+import sys
 import pandas as pd
 import requests
+
+# Add project root to path for imports
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from src.preprocessing.revise_dataset import CaliforniaHolidayCalendar
+from pandas.tseries.holiday import USFederalHolidayCalendar
 
 
 # ============================================================
@@ -547,6 +553,38 @@ def build_dataset(
     dataset.sort_values(["region", "time_utc"], inplace=True)
     return dataset, station_meta
 
+def apply_calendar_and_lag_features(dataset: pd.DataFrame, historical_csv: str) -> pd.DataFrame:
+    df = dataset.copy()
+    
+    # Calendar features
+    df["time_utc"] = pd.to_datetime(df["time_utc"], utc=True)
+    df["is_weekend"] = (df["time_utc"].dt.dayofweek >= 5).astype(int)
+    
+    fed_cal = USFederalHolidayCalendar()
+    fed_holidays = fed_cal.holidays(start=df["time_utc"].min(), end=df["time_utc"].max())
+    # Note: Using tz-naive normalize for holiday matching
+    df["US_federal_holidays"] = df["time_utc"].dt.tz_localize(None).dt.normalize().isin(fed_holidays).astype(int)
+    
+    ca_cal = CaliforniaHolidayCalendar()
+    state_holidays = ca_cal.holidays(start=df["time_utc"].min(), end=df["time_utc"].max())
+    df["state_holidays"] = df["time_utc"].dt.tz_localize(None).dt.normalize().isin(state_holidays).astype(int)
+    
+    # Lag feature from historical CSV
+    df["load_previous_week"] = pd.NA
+    if historical_csv and os.path.exists(historical_csv):
+        hist_df = pd.read_csv(historical_csv)
+        hist_df["time_utc"] = pd.to_datetime(hist_df["time_utc"], utc=True)
+        # Shift time_utc forward by 7 days so we can merge on exact hour
+        hist_df["time_utc"] = hist_df["time_utc"] + pd.Timedelta(days=7)
+        hist_df = hist_df[["region", "time_utc", "load_mw"]].rename(columns={"load_mw": "load_previous_week"})
+        
+        df = df.drop(columns=["load_previous_week"]).merge(hist_df, on=["region", "time_utc"], how="left")
+    else:
+        print(f"[warn] historical_csv not provided or not found ({historical_csv}). load_previous_week will be NaN.")
+        
+    return df
+
+
 
 # ============================================================
 # 6) OUTPUT WRITING
@@ -598,6 +636,12 @@ def main() -> None:
         action="store_true",
         help="If station weights CSV is missing/broken, fall back to geocoding/fallback coords (not recommended).",
     )
+    ap.add_argument(
+        "--historical-csv",
+        type=str,
+        default="./data/processed/filtered.csv",
+        help="Path to processed historical CSV to look up load_previous_week.",
+    )
     args = ap.parse_args()
 
     if args.date is None:
@@ -617,6 +661,9 @@ def main() -> None:
     dataset, station_meta = build_dataset(
         regions, start_date=start_date, end_date=end_date, debug=True, allow_fallback=args.allow_fallback
     )
+    
+    dataset = apply_calendar_and_lag_features(dataset, args.historical_csv)
+    
     p1, p2 = save_outputs(dataset, station_meta, start_date=start_date, end_date=end_date)
 
     expected = 24 * len(regions)
