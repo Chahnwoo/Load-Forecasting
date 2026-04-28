@@ -16,6 +16,7 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.svm import LinearSVR
 
 try:
@@ -23,6 +24,12 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
+
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
 
 try:
     import torch
@@ -339,6 +346,87 @@ class TransformerRegressorNet(nn.Module):
         return self.head(x).squeeze(-1)
 
 
+class BiLSTMRegressorNet(nn.Module):
+    """Bidirectional LSTM — Paper 1 (s43067) cites Bi-LSTM as outperforming unidirectional."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 64, num_layers: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True,
+        )
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return self.head(out[:, -1, :]).squeeze(-1)
+
+
+class STCALNet(nn.Module):
+    """
+    Spatio-Temporal CNN-Attention LSTM (ST-CALNet) from Paper 2 (electronics-14-02514).
+    Architecture: 1D-CNN → LSTM → Scaled-Dot-Product Attention + Residual+LN → LSTM → Dense.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 64,
+        num_layers: int = 2,
+        cnn_channels: int = 64,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv1d(input_dim, cnn_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        self.lstm1 = nn.LSTM(
+            input_size=cnn_channels,
+            hidden_size=hidden_dim,
+            num_layers=1,
+            batch_first=True,
+        )
+        self.W_Q = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.W_K = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.W_V = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self._attn_scale = hidden_dim ** 0.5
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.lstm2 = nn.LSTM(
+            input_size=hidden_dim,
+            hidden_size=hidden_dim,
+            num_layers=max(1, num_layers - 1),
+            batch_first=True,
+            dropout=dropout if num_layers > 2 else 0.0,
+        )
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x):
+        # x: [B, T, F]
+        z = self.conv(x.permute(0, 2, 1)).permute(0, 2, 1)  # [B, T, C]
+        h, _ = self.lstm1(z)                                  # [B, T, H]
+        Q = self.W_Q(h)
+        K = self.W_K(h)
+        V = self.W_V(h)
+        attn = torch.softmax(torch.bmm(Q, K.transpose(1, 2)) / self._attn_scale, dim=-1)
+        context = torch.bmm(attn, V)                          # [B, T, H]
+        h_prime = self.layer_norm(h + context)                # residual + LN
+        out, _ = self.lstm2(h_prime)
+        return self.head(out[:, -1, :]).squeeze(-1)
+
+
 class TorchSequenceRegressor(BaseEstimator, RegressorMixin):
     def __init__(
         self,
@@ -354,6 +442,7 @@ class TorchSequenceRegressor(BaseEstimator, RegressorMixin):
         d_model: int = 64,
         nhead: int = 4,
         dim_feedforward: int = 128,
+        cnn_channels: int = 64,
         device: str = "auto",
         seed: int = 42,
         verbose: bool = True,
@@ -370,6 +459,7 @@ class TorchSequenceRegressor(BaseEstimator, RegressorMixin):
         self.d_model = d_model
         self.nhead = nhead
         self.dim_feedforward = dim_feedforward
+        self.cnn_channels = cnn_channels
         self.device = device
         self.seed = seed
         self.verbose = verbose
@@ -456,6 +546,21 @@ class TorchSequenceRegressor(BaseEstimator, RegressorMixin):
                 nhead=self.nhead,
                 num_layers=self.num_layers,
                 dim_feedforward=self.dim_feedforward,
+                dropout=self.dropout,
+            )
+        elif self.model_type == "bilstm":
+            self.model_ = BiLSTMRegressorNet(
+                input_dim=input_dim,
+                hidden_dim=self.hidden_dim,
+                num_layers=self.num_layers,
+                dropout=self.dropout,
+            )
+        elif self.model_type == "stcalnet":
+            self.model_ = STCALNet(
+                input_dim=input_dim,
+                hidden_dim=self.hidden_dim,
+                num_layers=self.num_layers,
+                cnn_channels=self.cnn_channels,
                 dropout=self.dropout,
             )
         else:
@@ -555,7 +660,35 @@ def build_model(args):
             n_jobs=-1,
         )
 
-    if args.model in {"lstm", "transformer"}:
+    if args.model == "random_forest":
+        return RandomForestRegressor(
+            n_estimators=args.rf_n_estimators,
+            max_depth=args.rf_max_depth if args.rf_max_depth > 0 else None,
+            min_samples_leaf=args.rf_min_samples_leaf,
+            n_jobs=-1,
+            random_state=args.seed,
+        )
+
+    if args.model == "lightgbm":
+        if not LIGHTGBM_AVAILABLE:
+            raise ImportError(
+                "LightGBM is required for --model lightgbm. Install it with: pip install lightgbm"
+            )
+        return lgb.LGBMRegressor(
+            n_estimators=args.lgbm_n_estimators,
+            learning_rate=args.lgbm_learning_rate,
+            max_depth=args.lgbm_max_depth,
+            num_leaves=args.lgbm_num_leaves,
+            subsample=args.lgbm_subsample,
+            colsample_bytree=args.lgbm_colsample_bytree,
+            reg_alpha=args.lgbm_reg_alpha,
+            reg_lambda=args.lgbm_reg_lambda,
+            random_state=args.seed,
+            n_jobs=-1,
+            verbose=-1,
+        )
+
+    if args.model in {"lstm", "transformer", "bilstm", "stcalnet"}:
         return TorchSequenceRegressor(
             model_type=args.model,
             lookback=args.lookback,
@@ -569,6 +702,7 @@ def build_model(args):
             d_model=args.d_model,
             nhead=args.nhead,
             dim_feedforward=args.dim_feedforward,
+            cnn_channels=args.cnn_channels,
             device=args.device,
             seed=args.seed,
             verbose=True,
@@ -666,13 +800,13 @@ def fit_and_predict(args, prepared: dict):
     train_groups = prepared["train_groups"]
     valid_groups = prepared["valid_groups"]
 
-    if args.model in {"linear", "ridge", "hinge_regression", "xgboost"}:
+    if args.model in {"linear", "ridge", "hinge_regression", "xgboost", "random_forest", "lightgbm"}:
         model.fit(X_train, y_train)
         valid_preds = model.predict(X_valid)
         eval_valid_df = valid_df.copy()
         eval_y_valid = y_valid.copy()
 
-    elif args.model in {"lstm", "transformer"}:
+    elif args.model in {"lstm", "transformer", "bilstm", "stcalnet"}:
         model.fit(X_train, y_train, groups=train_groups)
         valid_preds, valid_idx = model.predict(X_valid, groups=valid_groups)
         eval_valid_df = valid_df.iloc[valid_idx].reset_index(drop=True)
@@ -766,7 +900,11 @@ def parse_args():
         "--model",
         type=str,
         default="linear",
-        choices=["linear", "ridge", "hinge_regression", "xgboost", "lstm", "transformer"],
+        choices=[
+            "linear", "ridge", "hinge_regression",
+            "xgboost", "random_forest", "lightgbm",
+            "lstm", "transformer", "bilstm", "stcalnet",
+        ],
         help="Which model backend to use.",
     )
     parser.add_argument(
@@ -800,6 +938,21 @@ def parse_args():
     parser.add_argument("--xgb_min_child_weight", type=float, default=1.0)
     parser.add_argument("--xgb_tree_method", type=str, default="hist")
 
+    # Random Forest
+    parser.add_argument("--rf_n_estimators", type=int, default=300)
+    parser.add_argument("--rf_max_depth", type=int, default=0, help="0 = unlimited")
+    parser.add_argument("--rf_min_samples_leaf", type=int, default=1)
+
+    # LightGBM
+    parser.add_argument("--lgbm_n_estimators", type=int, default=300)
+    parser.add_argument("--lgbm_learning_rate", type=float, default=0.05)
+    parser.add_argument("--lgbm_max_depth", type=int, default=-1, help="-1 = unlimited")
+    parser.add_argument("--lgbm_num_leaves", type=int, default=31)
+    parser.add_argument("--lgbm_subsample", type=float, default=0.8)
+    parser.add_argument("--lgbm_colsample_bytree", type=float, default=0.8)
+    parser.add_argument("--lgbm_reg_alpha", type=float, default=0.0)
+    parser.add_argument("--lgbm_reg_lambda", type=float, default=1.0)
+
     parser.add_argument("--lookback", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=128)
@@ -812,6 +965,8 @@ def parse_args():
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--dim_feedforward", type=int, default=128)
+    # ST-CALNet CNN channels
+    parser.add_argument("--cnn_channels", type=int, default=64)
 
     parser.add_argument(
         "--device",

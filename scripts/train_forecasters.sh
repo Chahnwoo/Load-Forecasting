@@ -75,6 +75,33 @@ do
 
   run_model xgboost "${month}"
 
+  run_model random_forest "${month}" \
+    --rf_n_estimators 300
+
+  run_model lightgbm "${month}" \
+    --lgbm_n_estimators 300 \
+    --lgbm_learning_rate 0.05 \
+    --lgbm_num_leaves 31
+
+  run_model bilstm "${month}" \
+    --lookback 24 \
+    --epochs 10 \
+    --batch_size 128 \
+    --lr 0.001 \
+    --hidden_dim 64 \
+    --num_layers 2 \
+    --dropout 0.1
+
+  run_model stcalnet "${month}" \
+    --lookback 24 \
+    --epochs 10 \
+    --batch_size 128 \
+    --lr 0.001 \
+    --hidden_dim 64 \
+    --num_layers 2 \
+    --cnn_channels 64 \
+    --dropout 0.1
+
   echo
   echo "Completed all models for ${month}"
 done
