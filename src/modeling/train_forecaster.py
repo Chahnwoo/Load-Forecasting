@@ -38,34 +38,23 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    # Dummy classes to avoid NameError when torch is not installed
-    class Dataset: pass
-    class nn:
-        class Module: pass
-        class MSELoss: pass
-        class LSTM: pass
-        class Linear: pass
-        class Sequential: pass
-        class ReLU: pass
-        class TransformerEncoderLayer: pass
-        class TransformerEncoder: pass
-    class torch:
-        class optim:
-            class Adam: pass
-        @staticmethod
-        def tensor(*args, **kwargs): pass
-        @staticmethod
-        def zeros(*args, **kwargs): pass
-        @staticmethod
-        def arange(*args, **kwargs): pass
-        @staticmethod
-        def exp(*args, **kwargs): pass
-        @staticmethod
-        def sin(*args, **kwargs): pass
-        @staticmethod
-        def cos(*args, **kwargs): pass
-        @staticmethod
-        def no_grad(*args, **kwargs): pass
+    torch = None
+    DataLoader = None
+
+    class Dataset:
+        pass
+
+    class _MissingTorchNN:
+        class Module:
+            pass
+
+    nn = _MissingTorchNN()
+
+try:
+    from pygam import LinearGAM, s, l, f
+    PYGAM_AVAILABLE = True
+except ImportError:
+    PYGAM_AVAILABLE = False
 
 
 # =============================================================================
@@ -207,6 +196,143 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["doy_cos"] = np.cos(2 * np.pi * df["day_of_year"] / 365.25)
 
     return df
+
+
+# =============================================================================
+# GAM-specific feature engineering
+# =============================================================================
+
+GAM_SPLINE_FEATURES = [
+    "temperature_2m",
+    "shortwave_radiation",
+    "load_previous_week",
+    "load_lag_24h",
+]
+GAM_CYCLIC_FEATURES = {
+    "hour": {"n_splines": 24, "edge_knots": [0, 24]},
+    "day_of_year": {"n_splines": 20, "edge_knots": [1, 367]},
+}
+GAM_LINEAR_FEATURES = [
+    "load_24h_avg",
+    "relative_humidity_2m",
+    "cloud_cover",
+    "wind_speed_10m",
+    "precipitation",
+    "is_weekend",
+    "US_federal_holidays",
+    "state_holidays",
+]
+GAM_FACTOR_FEATURES = ["region_code", "day_of_week"]
+GAM_FEATURE_COLUMNS = (
+    GAM_SPLINE_FEATURES
+    + list(GAM_CYCLIC_FEATURES.keys())
+    + GAM_LINEAR_FEATURES
+    + GAM_FACTOR_FEATURES
+)
+
+
+def build_gam_features(train_df: pd.DataFrame, valid_df: pd.DataFrame):
+    train_df = train_df.copy()
+    valid_df = valid_df.copy()
+    train_df["__gam_split"] = "train"
+    valid_df["__gam_split"] = "valid"
+
+    combined = pd.concat([train_df, valid_df], ignore_index=True)
+    combined = combined.sort_values(["region", "time_utc"]).reset_index(drop=True)
+
+    grouped_load = combined.groupby("region")["load_mw"]
+    combined["load_lag_24h"] = grouped_load.shift(24)
+    combined["load_24h_avg"] = grouped_load.transform(
+        lambda x: x.shift(1).rolling(24, min_periods=1).mean()
+    )
+
+    gam_train_df = combined[combined["__gam_split"] == "train"].drop(columns="__gam_split")
+    gam_valid_df = combined[combined["__gam_split"] == "valid"].drop(columns="__gam_split")
+
+    return (
+        gam_train_df.reset_index(drop=True),
+        gam_valid_df.reset_index(drop=True),
+    )
+
+
+def prepare_gam_data(train_df: pd.DataFrame, valid_df: pd.DataFrame):
+    train_df, valid_df = build_gam_features(train_df, valid_df)
+
+    before_train = len(train_df)
+    before_valid = len(valid_df)
+    train_df = train_df.dropna(subset=["load_lag_24h"]).reset_index(drop=True)
+    valid_df = valid_df.dropna(subset=["load_lag_24h"]).reset_index(drop=True)
+    print(
+        f"[INFO] GAM lag feature NaN drop: train {before_train - len(train_df):,}, "
+        f"valid {before_valid - len(valid_df):,} rows"
+    )
+
+    if train_df.empty:
+        raise ValueError("No usable GAM training rows remain after lag feature creation.")
+    if valid_df.empty:
+        raise ValueError("No usable GAM validation rows remain after lag feature creation.")
+
+    region_map = {r: i for i, r in enumerate(sorted(train_df["region"].unique()))}
+    unknown_valid_regions = sorted(set(valid_df["region"].unique()) - set(region_map))
+    if unknown_valid_regions:
+        raise ValueError(
+            "GAM validation data contains regions not seen in training: "
+            f"{unknown_valid_regions}"
+        )
+
+    train_df["region_code"] = train_df["region"].map(region_map).astype(int)
+    valid_df["region_code"] = valid_df["region"].map(region_map).astype(int)
+
+    X_train = train_df[GAM_FEATURE_COLUMNS].copy()
+    X_valid = valid_df[GAM_FEATURE_COLUMNS].copy()
+    y_train = np.log1p(train_df["load_mw"].values)
+    y_valid = valid_df["load_mw"].values
+
+    train_medians = X_train.median(numeric_only=True)
+    X_train = X_train.fillna(train_medians)
+    X_valid = X_valid.fillna(train_medians)
+
+    remaining_na = sorted(
+        set(X_train.columns[X_train.isna().any()])
+        | set(X_valid.columns[X_valid.isna().any()])
+    )
+    if remaining_na:
+        raise ValueError(
+            "GAM features still contain missing values after median imputation: "
+            f"{remaining_na}"
+        )
+
+    return (
+        X_train.to_numpy(dtype=float),
+        X_valid.to_numpy(dtype=float),
+        y_train,
+        y_valid,
+        GAM_FEATURE_COLUMNS,
+        train_df,
+        valid_df,
+    )
+
+
+def build_gam_terms(feature_cols: list, n_splines: int = 25, lam: float = 0.6):
+    terms = None
+    for i, col in enumerate(feature_cols):
+        if col in GAM_SPLINE_FEATURES:
+            term = s(i, n_splines=n_splines, lam=lam)
+        elif col in GAM_CYCLIC_FEATURES:
+            cyclic_config = GAM_CYCLIC_FEATURES[col]
+            term = s(
+                i,
+                n_splines=cyclic_config["n_splines"],
+                basis="cp",
+                edge_knots=cyclic_config["edge_knots"],
+                lam=lam,
+            )
+        elif col in GAM_FACTOR_FEATURES:
+            term = f(i)
+        else:
+            term = l(i)
+        terms = term if terms is None else terms + term
+    return terms
 
 
 def drop_bad_rows(df: pd.DataFrame, split_name: str) -> pd.DataFrame:
@@ -708,6 +834,13 @@ def build_model(args):
             verbose=True,
         )
 
+    if args.model == "gam":
+        if not PYGAM_AVAILABLE:
+            raise ImportError(
+                "PyGAM is required for --model gam. Install it with: pip install pygam"
+            )
+        return None
+
     raise ValueError(f"Unsupported model: {args.model}")
 
 
@@ -791,26 +924,48 @@ def build_feature_matrices(train_df: pd.DataFrame, valid_df: pd.DataFrame):
 def fit_and_predict(args, prepared: dict):
     model = build_model(args)
 
-    X_train = prepared["X_train"]
-    X_valid = prepared["X_valid"]
-    y_train = prepared["y_train"]
-    y_valid = prepared["y_valid"]
     train_df = prepared["train_df"]
     valid_df = prepared["valid_df"]
-    train_groups = prepared["train_groups"]
-    valid_groups = prepared["valid_groups"]
 
     if args.model in {"linear", "ridge", "hinge_regression", "xgboost", "random_forest", "lightgbm"}:
+        X_train = prepared["X_train"]
+        X_valid = prepared["X_valid"]
+        y_train = prepared["y_train"]
+        y_valid = prepared["y_valid"]
         model.fit(X_train, y_train)
         valid_preds = model.predict(X_valid)
         eval_valid_df = valid_df.copy()
         eval_y_valid = y_valid.copy()
 
     elif args.model in {"lstm", "transformer", "bilstm", "stcalnet"}:
+        X_train = prepared["X_train"]
+        X_valid = prepared["X_valid"]
+        y_train = prepared["y_train"]
+        y_valid = prepared["y_valid"]
+        train_groups = prepared["train_groups"]
+        valid_groups = prepared["valid_groups"]
         model.fit(X_train, y_train, groups=train_groups)
         valid_preds, valid_idx = model.predict(X_valid, groups=valid_groups)
         eval_valid_df = valid_df.iloc[valid_idx].reset_index(drop=True)
         eval_y_valid = y_valid[valid_idx]
+
+    elif args.model == "gam":
+        gam_data = prepare_gam_data(train_df, valid_df)
+        X_tr, X_va, y_tr, y_va, feat_cols, gam_train_df, gam_valid_df = gam_data
+
+        terms = build_gam_terms(
+            feat_cols,
+            n_splines=args.gam_n_splines,
+            lam=args.gam_lam,
+        )
+        model = LinearGAM(terms, max_iter=args.gam_max_iter, verbose=True)
+        model.fit(X_tr, y_tr)
+
+        valid_preds = np.expm1(model.predict(X_va))
+        valid_preds = np.maximum(valid_preds, 0.0)
+        eval_valid_df = gam_valid_df.copy()
+        eval_y_valid = y_va
+        train_df = gam_train_df
 
     else:
         raise ValueError(f"Unsupported model: {args.model}")
@@ -904,6 +1059,7 @@ def parse_args():
             "linear", "ridge", "hinge_regression",
             "xgboost", "random_forest", "lightgbm",
             "lstm", "transformer", "bilstm", "stcalnet",
+            "gam",
         ],
         help="Which model backend to use.",
     )
@@ -953,6 +1109,11 @@ def parse_args():
     parser.add_argument("--lgbm_reg_alpha", type=float, default=0.0)
     parser.add_argument("--lgbm_reg_lambda", type=float, default=1.0)
 
+    # GAM
+    parser.add_argument("--gam_n_splines", type=int, default=25)
+    parser.add_argument("--gam_lam", type=float, default=0.6)
+    parser.add_argument("--gam_max_iter", type=int, default=100)
+
     parser.add_argument("--lookback", type=int, default=24)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch_size", type=int, default=128)
@@ -999,8 +1160,15 @@ def main():
     )
     progress.update(1)
 
-    print_step("Building shared feature pipeline...")
-    prepared = build_feature_matrices(train_df, valid_df)
+    if args.model == "gam":
+        print_step("Preparing GAM feature data...")
+        prepared = {
+            "train_df": train_df.sort_values(["region", "time_utc"]).reset_index(drop=True),
+            "valid_df": valid_df.sort_values(["region", "time_utc"]).reset_index(drop=True),
+        }
+    else:
+        print_step("Building shared feature pipeline...")
+        prepared = build_feature_matrices(train_df, valid_df)
     progress.update(1)
 
     print_step(f"Training model: {args.model}")

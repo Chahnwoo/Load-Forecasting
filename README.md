@@ -43,7 +43,7 @@ source .venv/bin/activate
 Use an explicit package install command (safer than `-r requirements.txt` here):
 
 ```bash
-pip install pandas numpy requests openpyxl python-dotenv gridstatusio scikit-learn tqdm matplotlib xgboost
+pip install pandas numpy requests openpyxl python-dotenv gridstatusio scikit-learn tqdm matplotlib xgboost pygam
 ```
 
 > Note: `requirements.txt` currently appears to be an **environment snapshot** (pip-freeze-style table with `Package` / `Version` columns), not a standard pip requirements file that is always directly installable with `pip install -r`.
@@ -131,7 +131,7 @@ bash scripts/train_forecasters.sh
 This script:
 
 - Uses `data/processed/filtered.csv` as input.
-- Trains multiple models (`linear`, `ridge`, `hinge_regression`, `lstm`, `transformer`, `xgboost`) for each month `2025-01` through `2025-12`.
+- Trains multiple models (`linear`, `ridge`, `hinge_regression`, `lstm`, `transformer`, `xgboost`, `gam`) for each month `2025-01` through `2025-12`.
 - Writes outputs to `outputs/model_runs/`.
 
 ### Option B: Train one model for one month directly
