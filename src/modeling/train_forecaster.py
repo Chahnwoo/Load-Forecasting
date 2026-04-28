@@ -31,6 +31,34 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+    # Dummy classes to avoid NameError when torch is not installed
+    class Dataset: pass
+    class nn:
+        class Module: pass
+        class MSELoss: pass
+        class LSTM: pass
+        class Linear: pass
+        class Sequential: pass
+        class ReLU: pass
+        class TransformerEncoderLayer: pass
+        class TransformerEncoder: pass
+    class torch:
+        class optim:
+            class Adam: pass
+        @staticmethod
+        def tensor(*args, **kwargs): pass
+        @staticmethod
+        def zeros(*args, **kwargs): pass
+        @staticmethod
+        def arange(*args, **kwargs): pass
+        @staticmethod
+        def exp(*args, **kwargs): pass
+        @staticmethod
+        def sin(*args, **kwargs): pass
+        @staticmethod
+        def cos(*args, **kwargs): pass
+        @staticmethod
+        def no_grad(*args, **kwargs): pass
 
 
 # =============================================================================
@@ -192,7 +220,7 @@ def drop_bad_rows(df: pd.DataFrame, split_name: str) -> pd.DataFrame:
 
 
 def make_preprocessor(X: pd.DataFrame) -> ColumnTransformer:
-    categorical_cols = [col for col in X.columns if X[col].dtype == "object"]
+    categorical_cols = [col for col in X.columns if X[col].dtype == "object" or pd.api.types.is_string_dtype(X[col])]
     numeric_cols = [col for col in X.columns if col not in categorical_cols]
 
     numeric_transformer = Pipeline(
