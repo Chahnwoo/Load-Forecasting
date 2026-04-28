@@ -1017,6 +1017,15 @@ def _standardize_gridstatus_load_frame(raw: pd.DataFrame) -> pd.DataFrame:
         .rename_axis(columns=None)
     )
 
+    # GridStatus caiso_load_hourly may expose only TAC-area rows (for example
+    # PGE/SCE/SDGE/VEA/MWD) without a separate total CAISO column. When that
+    # happens, synthesize `caiso` as the sum of the available TAC-area load
+    # columns so downstream region selection can still use the CAISO total.
+    if "caiso" not in wide.columns:
+        tac_cols = [c for c in ["pge", "sce", "sdge", "vea", "mwd"] if c in wide.columns]
+        if tac_cols:
+            wide["caiso"] = wide[tac_cols].sum(axis=1, skipna=True, min_count=1)
+
     keep = ["time_utc"] + [c for c in CANONICAL_LOAD_COLS if c in wide.columns]
     return wide[keep].sort_values("time_utc").reset_index(drop=True)
 
@@ -1036,13 +1045,24 @@ def collect_gridstatus_load(
     """
     client = _get_gridstatus_client(api_key)
 
+    # CLI --start/--end are inclusive dates, but GridStatus dataset queries treat
+    # `end` as an exclusive boundary. Query one extra day, then slice back to the
+    # original inclusive UTC hourly index below.
+    gridstatus_start_date = start_date
+    gridstatus_end_date = end_date + timedelta(days=1)
+
     if debug:
-        print(f"[gridstatus_load] fetching dataset={GRIDSTATUS_DATASET} start={start_date} end={end_date}")
+        print(
+            "[gridstatus_load] fetching "
+            f"dataset={GRIDSTATUS_DATASET} "
+            f"request_start={start_date} request_end_inclusive={end_date} "
+            f"query_start={gridstatus_start_date} query_end_exclusive={gridstatus_end_date}"
+        )
 
     raw = client.get_dataset(
         dataset=GRIDSTATUS_DATASET,
-        start=start_date.strftime("%Y-%m-%d"),
-        end=end_date.strftime("%Y-%m-%d"),
+        start=gridstatus_start_date.strftime("%Y-%m-%d"),
+        end=gridstatus_end_date.strftime("%Y-%m-%d"),
         timezone="market",
     )
 
@@ -1418,6 +1438,11 @@ def main() -> None:
             f"Default: {DEFAULT_ENV_FILE}"
         ),
     )
+    ap.add_argument(
+        "--out-dir",
+        default="./data/raw",
+        help="Directory where output CSVs should be written. Default: ./data/raw",
+    )
     args = ap.parse_args()
 
     load_dotenv_file(args.env_file)
@@ -1451,6 +1476,7 @@ def main() -> None:
         station_meta,
         start_date=start_date,
         end_date=end_date,
+        out_dir=args.out_dir,
     )
 
     print(f"\nSaved dataset: {p1}")
