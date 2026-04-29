@@ -5,6 +5,8 @@ set -euo pipefail
 CSV_PATH="data/processed/filtered.csv"
 SCRIPT_PATH="src/modeling/train_forecaster.py"
 OUTPUT_DIR="outputs/model_runs"
+# caiso=system total (sum of sub-regions), vea/mwd hit 0 MW (breaks MAPE)
+REGIONS="pge,sce,sdge"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -21,6 +23,7 @@ run_model() {
   python "${SCRIPT_PATH}" "${CSV_PATH}" \
     --model "${model_name}" \
     --predict_month "${predict_month}" \
+    --regions "${REGIONS}" \
     --output_predictions "${OUTPUT_DIR}/${model_name}_${predict_month}_predictions.csv" \
     --output_metrics "${OUTPUT_DIR}/${model_name}_${predict_month}_metrics.csv" \
     "$@"

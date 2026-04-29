@@ -1252,6 +1252,17 @@ def parse_args():
         help="Optional path to save metrics CSV.",
     )
 
+    parser.add_argument(
+        "--regions",
+        type=str,
+        default="pge,sce,sdge",
+        help=(
+            "Comma-separated list of regions to train/evaluate on. "
+            "Defaults to 'pge,sce,sdge' (excludes caiso=system total, "
+            "vea and mwd which have near-zero loads that break MAPE)."
+        ),
+    )
+
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--ridge_alpha", type=float, default=1.0)
@@ -1336,6 +1347,15 @@ def main():
     print_step("Reading CSV...")
     df = pd.read_csv(csv_path)
     progress.update(1)
+
+    # Filter to the requested regions
+    regions = [r.strip() for r in args.regions.split(",") if r.strip()]
+    all_regions = df["region"].unique().tolist()
+    unknown = [r for r in regions if r not in all_regions]
+    if unknown:
+        raise ValueError(f"Unknown region(s): {unknown}. Available: {all_regions}")
+    df = df[df["region"].isin(regions)].copy()
+    print_step(f"Region filter: {regions} ({len(df):,} rows kept)")
 
     print_step("Preparing train/validation split from predict_month...")
     train_df, valid_df, month_start, next_month_start, train_end = prepare_base_data(
