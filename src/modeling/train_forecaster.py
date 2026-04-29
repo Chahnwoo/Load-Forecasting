@@ -720,6 +720,7 @@ class TorchSequenceRegressor(BaseEstimator, RegressorMixin):
                 preds = self.model_(xb)
                 loss = loss_fn(preds, yb)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model_.parameters(), max_norm=1.0)
                 optimizer.step()
 
                 batch_size = xb.size(0)
