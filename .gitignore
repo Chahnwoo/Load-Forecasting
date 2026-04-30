@@ -1,4 +1,5 @@
 .DS_Store
+Millenium_repo-20260429T212610Z-3-001/
 .env
 .venv/
 __pycache__/
@@ -14,6 +15,10 @@ data/processed/*
 !data/processed/.gitkeep
 outputs/model_runs/*
 !outputs/model_runs/.gitkeep
+!outputs/model_runs/**/
+!outputs/model_runs/**/*.csv
+!outputs/model_runs/**/*.png
+outputs/model_runs/comparison_outputs/model_comparison_dashboard.png
 .venv/
 __pycache__/
 .DS_Store
