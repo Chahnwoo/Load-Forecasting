@@ -6,15 +6,96 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
+import xarray as xr
 
 from src.backtesting.acquisition import (GDEX_SOURCE, caiso_request,
                                          gdex_object_url, gdex_ncss_url, hourly_from_gdex,
                                          parse_gdex_name, sha256_file, write_manifest)
 from scripts.acquire_december_2025_caiso import normalize, raw_identifiers
 from src.backtesting.strict_dataset import ACTUAL_ITEM, DAM_ITEM
+from scripts import acquire_gdex_gfs_0p25 as gdex_script
 
 
 class StrictAcquisitionTests(unittest.TestCase):
+    def test_gdex_required_objects_bracket_three_hour_products(self):
+        fixture = pd.DataFrame({
+            "operating_day": ["fixture", "fixture"],
+            "forecast_cutoff_utc": [pd.Timestamp("2025-11-30T11:00Z")] * 2,
+            "time_utc": [pd.Timestamp("2025-12-01T07:00Z"), pd.Timestamp("2025-12-01T08:00Z")],
+        })
+        original = gdex_script.operating_intervals
+        gdex_script.operating_intervals = lambda month: fixture
+        try:
+            objects = gdex_script.required_objects("fixture")
+        finally:
+            gdex_script.operating_intervals = original
+        self.assertEqual([
+            "gfs.0p25.2025113000.f030.grib2",
+            "gfs.0p25.2025113000.f033.grib2",
+        ], objects)
+        self.assertFalse(any("f031" in item or "f032" in item for item in objects))
+
+    def test_metadata_discovery_uses_canonical_names_not_level_description(self):
+        names = list(gdex_script.CANONICAL_VARIABLES.values()) + [
+            "Total_precipitation_surface_3_Hour_Accumulation",
+            "Downward_Short-Wave_Radiation_Flux_surface_3_Hour_Average",
+        ]
+        xml = "<dataset>" + "".join(
+            f'<variable name="{name}" description="GRIB variable without physical metre level" />'
+            for name in names) + "</dataset>"
+        class Response:
+            content = xml.encode()
+            def raise_for_status(self): pass
+        class Session:
+            def get(self, *args, **kwargs): return Response()
+        found, _ = gdex_script.discover_variables(Session(), "gfs.0p25.2025113000.f030.grib2")
+        self.assertEqual("Temperature_height_above_ground", found["temperature_2m"])
+
+    def test_ambiguous_statistical_variable_discovery_fails_closed(self):
+        names = list(gdex_script.CANONICAL_VARIABLES.values()) + [
+            "Total_precipitation_surface_3_Hour_Accumulation",
+            "Total_precipitation_surface_6_Hour_Accumulation",
+            "Downward_Short-Wave_Radiation_Flux_surface_3_Hour_Average",
+        ]
+        xml = "<dataset>" + "".join(f'<variable name="{name}" />' for name in names) + "</dataset>"
+        class Response:
+            content = xml.encode()
+            def raise_for_status(self): pass
+        class Session:
+            def get(self, *args, **kwargs): return Response()
+        with self.assertRaisesRegex(RuntimeError, "expected one precipitation"):
+            gdex_script.discover_variables(Session(), "gfs.0p25.2025113000.f030.grib2")
+
+    def test_vertical_levels_are_selected_per_physical_field(self):
+        heights = xr.DataArray([2., 10.], dims="vertical", attrs={"units": "m", "standard_name": "height"})
+        array = xr.DataArray([280., 290.], dims="vertical", coords={"vertical": heights}, attrs={"units": "K"})
+        self.assertEqual(280., float(gdex_script._select_height(array, 2, "temperature_2m")))
+        self.assertEqual(290., float(gdex_script._select_height(array, 10, "u_wind_10m")))
+        with self.assertRaisesRegex(RuntimeError, "requires 5 m"):
+            gdex_script._select_height(array, 5, "temperature_2m")
+
+    def test_extract_selects_two_metre_temperature_rh_and_ten_metre_wind(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "levels.nc"
+            coords = {"height": xr.DataArray([2., 10.], dims="height", attrs={"units": "m", "standard_name": "height"}),
+                      "lat": [35.], "lon": [-120.]}
+            def field(values, units):
+                return xr.DataArray(np.asarray(values).reshape(2, 1, 1), dims=("height", "lat", "lon"), coords=coords, attrs={"units": units})
+            ds=xr.Dataset({"t": field([280., 999.], "K"), "rh": field([45., 999.], "%"),
+                           "u": field([999., 3.], "m/s"), "v": field([999., 4.], "m/s"),
+                           "cloud": (("lat","lon"), [[50.]]),
+                           "precip": (("lat","lon"), [[3.]]), "solar": (("lat","lon"), [[100.]])})
+            ds["precip"].attrs["description"]="0-3 hour accumulation"
+            ds["solar"].attrs["description"]="0-3 hour average"
+            ds.to_netcdf(path)
+            variables={"temperature_2m":"t", "relative_humidity_2m":"rh", "u_wind_10m":"u", "v_wind_10m":"v",
+                       "cloud_cover":"cloud", "precipitation":"precip", "shortwave_radiation":"solar"}
+            stations=pd.DataFrame({"station_name":["X"], "latitude":[35.], "longitude":[-120.], "population_weight":[1.]})
+            row=gdex_script.extract(path,variables,stations,{})[0]
+            self.assertAlmostEqual(6.85,row["temperature_2m"])
+            self.assertEqual((45.,3.,4.),(row["relative_humidity_2m"],row["u_wind_10m"],row["v_wind_10m"]))
+
     def test_acquisition_module_entrypoints_import_from_repository_root(self):
         repository_root = Path(__file__).resolve().parents[1]
         modules = (

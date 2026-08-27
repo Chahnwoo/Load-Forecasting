@@ -11,11 +11,12 @@ from src.backtesting.acquisition import (GDEX_DATASET, GDEX_MODEL, GDEX_REFERENC
     gdex_ncss_url, gdex_object_url, hourly_from_gdex, parse_gdex_name, sha256_file, write_manifest)
 from src.backtesting.strict_dataset import operating_intervals
 
-PHYSICAL_FIELDS = {
- "temperature_2m": ("temperature", "2 m"), "relative_humidity_2m": ("relative humidity", "2 m"),
- "cloud_cover": ("total cloud",), "u_wind_10m": ("u-component", "10 m"),
- "v_wind_10m": ("v-component", "10 m"), "precipitation": ("total precipitation",),
- "shortwave_radiation": ("downward short-wave",),
+CANONICAL_VARIABLES = {
+ "temperature_2m": "Temperature_height_above_ground",
+ "relative_humidity_2m": "Relative_humidity_height_above_ground",
+ "cloud_cover": "Total_cloud_cover_entire_atmosphere",
+ "u_wind_10m": "u-component_of_wind_height_above_ground",
+ "v_wind_10m": "v-component_of_wind_height_above_ground",
 }
 
 def required_objects(month):
@@ -25,8 +26,13 @@ def required_objects(month):
         while cycle+pd.Timedelta(hours=10)>cutoff: cycle-=pd.Timedelta(hours=6)
         for valid in day.time_utc:
             lead=int((valid-cycle).total_seconds()/3600)
-            if not 0 <= lead <= 120: raise RuntimeError(f"d084001 hourly range cannot cover {valid} from {cycle}")
-            names.add(f"gfs.0p25.{cycle:%Y%m%d%H}.f{lead:03d}.grib2")
+            if not 0 <= lead <= 240: raise RuntimeError(f"d084001 3-hour range cannot cover {valid} from {cycle}")
+            # Instantaneous quantities are constructed from the adjacent products
+            # belonging to this same eligible cycle.  Exact products need no upper
+            # neighbour; set semantics deduplicate brackets shared by target hours.
+            lower=lead-(lead % 3); upper=lower if lead == lower else lower+3
+            for product_lead in (lower,upper):
+                names.add(f"gfs.0p25.{cycle:%Y%m%d%H}.f{product_lead:03d}.grib2")
     return sorted(names)
 
 def discover_variables(session, name):
@@ -37,11 +43,22 @@ def discover_variables(session, name):
     for node in root.iter():
         if node.tag.rsplit("}",1)[-1].lower() == "variable":
             key=node.attrib.get("name") or node.attrib.get("vocabulary_name")
-            description=" ".join(node.attrib.values()).lower()
-            if key: variables.append((key,description))
+            if key: variables.append((key,dict(node.attrib)))
     found={}
-    for field, needles in PHYSICAL_FIELDS.items():
-        candidates=[name for name,desc in variables if all(n in desc for n in needles)]
+    for field, canonical in CANONICAL_VARIABLES.items():
+        candidates=[name for name,_ in variables if name == canonical]
+        if len(candidates)!=1: raise RuntimeError(f"NCSS metadata expected one {field}, found {candidates}")
+        found[field]=candidates[0]
+    statistical = {
+      "precipitation": (("total", "precipitation"), ("surface",), ("accum", "statistical")),
+      "shortwave_radiation": (("downward", "short", "wave", "radiation"), ("surface",), ("average", "statistical")),
+    }
+    for field,(parameter,level,stat_kinds) in statistical.items():
+        candidates=[]
+        for name,attrs in variables:
+            text=" ".join([name,*map(str,attrs.values())]).lower().replace("_"," ").replace("-"," ")
+            if all(word in text for word in parameter) and all(word in text for word in level) and any(kind in text for kind in stat_kinds):
+                candidates.append(name)
         if len(candidates)!=1: raise RuntimeError(f"NCSS metadata expected one {field}, found {candidates}")
         found[field]=candidates[0]
     return found, endpoint
@@ -69,10 +86,43 @@ def download(session,url,path,retries=4):
 def interval_hours(attrs, field):
     text=" ".join(str(v) for v in attrs.values())
     matches=re.findall(r"(\d+)\s*[-–]\s*(\d+)\s*hour",text,re.I)
-    if not matches: raise RuntimeError(f"{field} lacks a GRIB statistical interval in NCSS metadata: {attrs}")
-    start,end=map(int,matches[-1]); period=end-start
+    if matches:
+        start,end=map(int,matches[-1]); period=end-start
+    else:
+        statistical_text=" ".join(f"{key} {value}" for key,value in attrs.items()
+                                  if any(token in str(key).lower() for token in ("interval","duration","statistical")))
+        durations=re.findall(r"(?:interval|duration|statistical)[^\d]{0,40}(\d+)\s*hour|\b(\d+)\s*hour[^,;]*(?:accumulation|average)",statistical_text or text,re.I)
+        values=[int(a or b) for a,b in durations]
+        if len(set(values)) != 1: raise RuntimeError(f"{field} lacks a GRIB statistical interval in NCSS metadata: {attrs}")
+        period=values[0]
     if period<=0: raise RuntimeError(f"invalid {field} interval: {attrs}")
     return period
+
+def _select_height(data_array, desired_metres, field):
+    """Select the DataArray's own vertical coordinate, never a guessed name."""
+    candidates=[]
+    for name,coord in data_array.coords.items():
+        attrs=" ".join(str(v) for v in coord.attrs.values()).lower()
+        units=str(coord.attrs.get("units", "")).lower()
+        if name in data_array.dims and units in {"m", "meter", "meters", "metre", "metres"} and (
+                "height" in name.lower() or "height" in attrs or "above ground" in attrs):
+            candidates.append(name)
+    if len(candidates) != 1:
+        raise RuntimeError(f"{field} expected one associated height coordinate, found {candidates}")
+    coordinate=candidates[0]
+    available=[float(value) for value in data_array[coordinate].values.reshape(-1)]
+    matches=[index for index,value in enumerate(available) if abs(value-desired_metres) < 1e-6]
+    if len(matches) != 1:
+        raise RuntimeError(f"{field} requires {desired_metres:g} m; available levels are {available}")
+    return data_array.isel({coordinate: matches[0]})
+
+def _validate_units(data_array, field):
+    units=str(data_array.attrs.get("units", "")).strip().lower().replace(" ", "")
+    allowed={"temperature_2m": {"k", "kelvin"}, "relative_humidity_2m": {"%", "percent", "percentage"},
+             "u_wind_10m": {"m/s", "ms-1", "m.s-1", "metersecond-1", "metresecond-1"},
+             "v_wind_10m": {"m/s", "ms-1", "m.s-1", "metersecond-1", "metresecond-1"}}
+    if field in allowed and units not in allowed[field]:
+        raise RuntimeError(f"{field} has incompatible units {data_array.attrs.get('units')!r}")
 
 def extract(path,variables,stations,parsed):
     import xarray as xr
@@ -84,7 +134,13 @@ def extract(path,variables,stations,parsed):
             lon=station.longitude % 360 if float(ds[lon_name].max())>180 else station.longitude
             values={}
             for field,var in variables.items():
-                value=ds[var].sel({lat_name:station.latitude,lon_name:lon},method="nearest").squeeze()
+                array=ds[var]
+                if field in {"temperature_2m","relative_humidity_2m","u_wind_10m","v_wind_10m"}:
+                    level=2 if field in {"temperature_2m","relative_humidity_2m"} else 10
+                    array=_select_height(array,level,field)
+                    _validate_units(array,field)
+                value=array.sel({lat_name:station.latitude,lon_name:lon},method="nearest").squeeze()
+                if value.size != 1: raise RuntimeError(f"{field} did not reduce to one grid value; dimensions are {value.dims}")
                 values[field]=float(value.values)
             values["temperature_2m"]-=273.15
             values["precipitation_period_hours"]=interval_hours(ds[variables["precipitation"]].attrs,"precipitation")
@@ -103,9 +159,11 @@ def main():
     if a.smoke_test: objects=["gfs.0p25.2025113000.f030.grib2"]
     records=[]; extracted=[]
     with requests.Session() as session:
-      variables,metadata_url=discover_variables(session,objects[0])
       pad=.15; bbox=dict(north=stations.latitude.max()+pad,south=stations.latitude.min()-pad,east=stations.longitude.max()+pad,west=stations.longitude.min()-pad)
       for name in objects:
+        # Statistical variable identifiers encode their product-specific interval,
+        # so discovery is deliberately repeated for every backing object.
+        variables,metadata_url=discover_variables(session,name)
         parsed=parse_gdex_name(name); request_url,params=gdex_ncss_url(name,list(variables.values()),**bbox)
         target=raw/(name+".nc"); retrieved=download(session,request_url,target); checksum=sha256_file(target)
         for row in extract(target,variables,stations,parsed):
