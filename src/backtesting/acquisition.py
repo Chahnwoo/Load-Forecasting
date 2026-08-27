@@ -68,7 +68,7 @@ def gdex_object_url(name: str) -> str:
 
 
 def gdex_ncss_url(name: str, variables: list[str], *, north: float, south: float,
-                  east: float, west: float, accept: str = "netcdf4") -> tuple[str, dict[str, str]]:
+                  east: float, west: float) -> tuple[str, dict[str, str]]:
     """Construct a deterministic small-box NCSS request for an exact backing object."""
     parsed = parse_gdex_name(name)
     if not variables or any(not str(v).strip() for v in variables):
@@ -76,10 +76,14 @@ def gdex_ncss_url(name: str, variables: list[str], *, north: float, south: float
     if not (-90 <= south <= north <= 90 and -180 <= west <= east <= 180):
         raise ValueError("invalid NCSS bounding box")
     day = parsed["model_init_time_utc"].strftime("%Y%m%d")
+    valid_time = parsed["model_init_time_utc"] + pd.Timedelta(
+        hours=parsed["forecast_lead_hours"])
+    if valid_time != parsed["valid_time_utc"]:
+        raise ValueError(f"GDEX valid time does not match backing object identity: {name}")
     base = f"{GDEX_ROOT}/ncss/grid/files/g/{GDEX_DATASET}/{day[:4]}/{day}/{parsed['filename']}"
     params = {"var": ",".join(sorted(set(variables))), "north": str(north), "south": str(south),
-              "east": str(east), "west": str(west), "horizStride": "1", "accept": accept,
-              "addLatLon": "true"}
+              "east": str(east), "west": str(west), "horizStride": "1", "accept": "netCDF",
+              "time": valid_time.strftime("%Y-%m-%dT%H:%M:%SZ"), "addLatLon": "true"}
     return f"{base}?{urlencode(params)}", params
 
 
