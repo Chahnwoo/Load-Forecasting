@@ -83,7 +83,7 @@ class StrictAcquisitionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "raw.nc"
             source.write_bytes(b"ncss fixture\n")
-            self.assertEqual("sha256:b9180be29acc82af2f8f2394d555649e48fa1ebd49d89b0bfb2bcfbbcb704594",
+            self.assertEqual("sha256:96c77686dc6b854b85a5b2cb8248f5f6325a66c92ff1f7a4f44582c471bdeda0",
                              sha256_file(source))
             manifest = Path(directory) / "manifest.json"
             gdex_provenance = {"dataset": "d084001", "dataset_reference": "doi:fixture",
@@ -120,7 +120,13 @@ class StrictAcquisitionTests(unittest.TestCase):
         # The 09Z APCP amount is distributed over 07, 08, 09Z, not interpolated.
         self.assertEqual(2., hourly.loc[pd.Timestamp("2025-12-01T08:00Z"), "precipitation"])
         self.assertEqual(400., hourly.loc[pd.Timestamp("2025-12-01T08:00Z"), "shortwave_radiation"])
-        self.assertEqual(0., hourly.loc[pd.Timestamp("2025-12-01T06:00Z"), "precipitation"])
+        # The first interval covers 04, 05, 06Z, but only its in-range 06Z hour is
+        # assigned. Its amount is still divided by the original three-hour period.
+        self.assertEqual(1., hourly.loc[pd.Timestamp("2025-12-01T06:00Z"), "precipitation"])
+        self.assertEqual(100., hourly.loc[pd.Timestamp("2025-12-01T06:00Z"), "shortwave_radiation"])
+        self.assertEqual(pd.Timestamp("2025-12-01T06:00Z"), hourly.index.min())
+        self.assertEqual(pd.Timestamp("2025-12-01T12:00Z"), hourly.index.max())
+        self.assertNotIn(pd.Timestamp("2025-12-01T05:00Z"), hourly.index)
 
     def test_incomplete_cycle_and_bad_accumulation_fail(self):
         incomplete = self.grid_frame().drop(index=1)
