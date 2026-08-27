@@ -109,8 +109,12 @@ def hourly_from_gdex(frame: pd.DataFrame) -> pd.DataFrame:
             pp, sp = int(row.precipitation_period_hours), int(row.shortwave_period_hours)
             if pp <= 0 or sp <= 0:
                 raise ValueError("statistical periods must be positive metadata-derived hours")
-            out.loc[pd.date_range(end-pd.Timedelta(hours=pp-1), end, freq="h"), "precipitation"] = row.precipitation / pp
-            out.loc[pd.date_range(end-pd.Timedelta(hours=sp-1), end, freq="h"), "shortwave_radiation"] = row.shortwave_radiation
+            precipitation_hours = pd.date_range(end-pd.Timedelta(hours=pp-1), end, freq="h")
+            shortwave_hours = pd.date_range(end-pd.Timedelta(hours=sp-1), end, freq="h")
+            # A statistical interval may begin before the requested output range. Preserve
+            # its true duration while assigning only the hours represented in that range.
+            out.loc[precipitation_hours.intersection(idx), "precipitation"] = row.precipitation / pp
+            out.loc[shortwave_hours.intersection(idx), "shortwave_radiation"] = row.shortwave_radiation
         out["wind_speed_10m"] = (out.u_wind_10m ** 2 + out.v_wind_10m ** 2) ** .5
         out["station"] = part.station.iloc[0]; out["model_init_time_utc"] = init; out["valid_time_utc"] = out.index
         temp_f = out.temperature_2m * 9 / 5 + 32
