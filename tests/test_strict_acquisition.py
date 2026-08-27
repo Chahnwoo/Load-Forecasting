@@ -36,36 +36,61 @@ class StrictAcquisitionTests(unittest.TestCase):
         ], objects)
         self.assertFalse(any("f031" in item or "f032" in item for item in objects))
 
-    def test_metadata_discovery_uses_canonical_names_not_level_description(self):
-        names = list(gdex_script.CANONICAL_VARIABLES.values()) + [
-            "Total_precipitation_surface_3_Hour_Accumulation",
-            "Downward_Short-Wave_Radiation_Flux_surface_3_Hour_Average",
-        ]
-        xml = "<dataset>" + "".join(
-            f'<variable name="{name}" description="GRIB variable without physical metre level" />'
-            for name in names) + "</dataset>"
+    def _gdex_metadata_session(self, content):
         class Response:
-            content = xml.encode()
+            def __init__(self, body): self.content = body
             def raise_for_status(self): pass
         class Session:
-            def get(self, *args, **kwargs): return Response()
-        found, _ = gdex_script.discover_variables(Session(), "gfs.0p25.2025113000.f030.grib2")
-        self.assertEqual("Temperature_height_above_ground", found["temperature_2m"])
+            def get(self, *args, **kwargs): return Response(content)
+        return Session()
 
-    def test_ambiguous_statistical_variable_discovery_fails_closed(self):
-        names = list(gdex_script.CANONICAL_VARIABLES.values()) + [
-            "Total_precipitation_surface_3_Hour_Accumulation",
-            "Total_precipitation_surface_6_Hour_Accumulation",
-            "Downward_Short-Wave_Radiation_Flux_surface_3_Hour_Average",
-        ]
-        xml = "<dataset>" + "".join(f'<variable name="{name}" />' for name in names) + "</dataset>"
-        class Response:
-            content = xml.encode()
-            def raise_for_status(self): pass
-        class Session:
-            def get(self, *args, **kwargs): return Response()
-        with self.assertRaisesRegex(RuntimeError, "expected one precipitation"):
-            gdex_script.discover_variables(Session(), "gfs.0p25.2025113000.f030.grib2")
+    def _gdex_das(self):
+        return (Path(__file__).parent / "fixtures/gdex_gfs_opendap.das").read_bytes()
+
+    def test_opendap_discovery_uses_exact_instantaneous_machine_names(self):
+        found, endpoint = gdex_script.discover_variables(
+            self._gdex_metadata_session(self._gdex_das()),
+            "gfs.0p25.2025113000.f030.grib2")
+        self.assertEqual("Temperature_height_above_ground", found["temperature_2m"])
+        self.assertEqual("Relative_humidity_height_above_ground", found["relative_humidity_2m"])
+        self.assertEqual("u-component_of_wind_height_above_ground", found["u_wind_10m"])
+        self.assertEqual("v-component_of_wind_height_above_ground", found["v_wind_10m"])
+        self.assertTrue(endpoint.endswith("gfs.0p25.2025113000.f030.grib2.das"))
+
+    def test_grib_metadata_discovers_three_and_six_hour_shortwave(self):
+        three, _ = gdex_script.discover_variables(
+            self._gdex_metadata_session(self._gdex_das()),
+            "gfs.0p25.2025113000.f030.grib2")
+        self.assertEqual("Downward_Short-Wave_Radiation_Flux_surface_3_Hour_Average",
+                         three["shortwave_radiation"])
+        six_das = self._gdex_das().replace(b"_3_Hour_Average", b"_6_Hour_Average").replace(
+            b'"3 hour"', b'"6 hour"')
+        six, _ = gdex_script.discover_variables(
+            self._gdex_metadata_session(six_das), "gfs.0p25.2025113000.f033.grib2")
+        self.assertEqual("Downward_Short-Wave_Radiation_Flux_surface_6_Hour_Average",
+                         six["shortwave_radiation"])
+
+    def test_grib_metadata_discovers_mixed_precipitation_and_entire_atmosphere_cloud(self):
+        found, _ = gdex_script.discover_variables(
+            self._gdex_metadata_session(self._gdex_das()),
+            "gfs.0p25.2025113000.f030.grib2")
+        self.assertEqual("Total_precipitation_surface_Mixed_intervals_Accumulation",
+                         found["precipitation"])
+        self.assertEqual("Total_cloud_cover_entire_atmosphere", found["cloud_cover"])
+
+    def test_ambiguous_physical_metadata_matches_fail_closed_with_diagnostics(self):
+        duplicate = b"""
+    Other_shortwave_surface_3_Hour_Average {
+        String Grib2_Parameter_Name "Downward Short-Wave Radiation Flux";
+        String Grib2_Level_Desc "Ground or water surface";
+        String Grib2_Statistical_Process_Type "Average";
+        String units "W.m-2";
+    }
+"""
+        das = self._gdex_das().replace(b"    NC_GLOBAL {", duplicate + b"    NC_GLOBAL {")
+        with self.assertRaisesRegex(RuntimeError, "expected one shortwave_radiation.*parameter"):
+            gdex_script.discover_variables(
+                self._gdex_metadata_session(das), "gfs.0p25.2025113000.f030.grib2")
 
     def test_vertical_levels_are_selected_per_physical_field(self):
         heights = xr.DataArray([2., 10.], dims="vertical", attrs={"units": "m", "standard_name": "height"})
