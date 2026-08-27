@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,24 @@ from src.backtesting.strict_dataset import ACTUAL_ITEM, DAM_ITEM
 
 
 class StrictAcquisitionTests(unittest.TestCase):
+    def test_acquisition_module_entrypoints_import_from_repository_root(self):
+        repository_root = Path(__file__).resolve().parents[1]
+        modules = (
+            "scripts.acquire_december_2025_caiso",
+            "scripts.acquire_gdex_gfs_0p25",
+            "scripts.acquire_strict_backtest_inputs",
+        )
+        for module in modules:
+            with self.subTest(module=module):
+                result = subprocess.run(
+                    [sys.executable, "-m", module, "--help"],
+                    cwd=repository_root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
     def test_caiso_request_is_exact_and_encoded(self):
         url, params = caiso_request(pd.Timestamp("2025-12-01T08:00Z"),
                                     pd.Timestamp("2025-12-02T08:00Z"),
