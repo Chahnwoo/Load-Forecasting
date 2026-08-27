@@ -136,7 +136,7 @@ class StrictAcquisitionTests(unittest.TestCase):
                            "precip": (("lat","lon"), [[3.]]), "solar": (("lat","lon"), [[100.]])})
             ds["precip"].attrs["description"]="0-3 hour accumulation"
             ds["solar"].attrs["description"]="0-3 hour average"
-            ds.to_netcdf(path)
+            ds.to_netcdf(path, engine="scipy")
             variables={"temperature_2m":"t", "relative_humidity_2m":"rh", "u_wind_10m":"u", "v_wind_10m":"v",
                        "cloud_cover":"cloud", "precipitation":"precip", "shortwave_radiation":"solar"}
             stations=pd.DataFrame({"station_name":["X"], "latitude":[35.], "longitude":[-120.], "population_weight":[1.]})
@@ -196,9 +196,54 @@ class StrictAcquisitionTests(unittest.TestCase):
         url, params = gdex_ncss_url(name, ["Temperature_height_above_ground"],
                                     north=42, south=32, east=-114, west=-125)
         self.assertIn("/ncss/grid/files/g/d084001/2025/20251130/" + name, url)
-        self.assertEqual("netcdf4", params["accept"])
+        self.assertEqual("netCDF", params["accept"])
+        self.assertNotIn("netCDF4", url)
+        self.assertEqual("2025-12-01T06:00:00Z", params["time"])
         self.assertEqual("Temperature_height_above_ground", params["var"])
+        self.assertEqual({"north": "42", "south": "32", "east": "-114", "west": "-125"},
+                         {key: params[key] for key in ("north", "south", "east", "west")})
         self.assertNotIn("fileServer", url)
+
+    def _ncss_response(self, content, content_type="application/x-netcdf", status=200,
+                       url="https://fixture.example/final"):
+        class Response:
+            headers = {"content-type": content_type}
+            status_code = status
+            def __init__(self):
+                self.content = content
+                self.url = url
+        class Session:
+            def get(self, *args, **kwargs): return Response()
+        return Session()
+
+    def test_ncss_download_accepts_classic_netcdf_signature(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "subset.nc"
+            gdex_script.download(self._ncss_response(b"CDF\x01fixture"),
+                                 "https://fixture.example/request", path)
+            self.assertEqual(b"CDF\x01fixture", path.read_bytes())
+
+    def test_ncss_download_rejects_error_documents_and_invalid_magic(self):
+        cases = ((b"<html>error</html>", "text/html", "not NetCDF-compatible"),
+                 (b"plain error", "text/plain", "not NetCDF-compatible"),
+                 (b"not a netcdf", "application/x-netcdf", "invalid NetCDF signature"))
+        for body, content_type, message in cases:
+            with self.subTest(content_type=content_type, body=body), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(RuntimeError, message):
+                    gdex_script.download(self._ncss_response(body, content_type),
+                                         "https://fixture.example/request", Path(directory) / "subset.nc")
+
+    def test_ncss_http_error_includes_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(RuntimeError) as raised:
+                gdex_script.download(self._ncss_response(
+                    b"Format netCDF4 is not supported", "text/plain", 400),
+                    "https://fixture.example/request", Path(directory) / "subset.nc")
+        message = str(raised.exception)
+        self.assertIn("HTTP 400", message)
+        self.assertIn("content-type='text/plain'", message)
+        self.assertIn("Format netCDF4 is not supported", message)
+        self.assertIn("final request URL=https://fixture.example/final", message)
 
     def test_real_oasis_contract_filtering_and_provenance(self):
         fixture = pd.DataFrame({"INTERVALSTARTTIME_GMT": ["2025-12-01T08:00Z"] * 6,

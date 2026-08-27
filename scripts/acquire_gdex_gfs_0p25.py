@@ -146,7 +146,26 @@ def download(session,url,path,retries=4):
     if path.exists() or sidecar.exists(): raise RuntimeError(f"incomplete prior NCSS state: {path}")
     for attempt in range(retries):
         try:
-            response=session.get(url,timeout=(20,300)); response.raise_for_status()
+            response=session.get(url,timeout=(20,300))
+            content_type=response.headers.get("content-type", "")
+            final_url=getattr(response,"url",None) or url
+            if response.status_code != 200:
+                body=response.content.decode("utf-8",errors="replace")[:1000]
+                raise RuntimeError(
+                    f"NCSS download failed: HTTP {response.status_code}; "
+                    f"content-type={content_type!r}; response body={body!r}; "
+                    f"final request URL={final_url}")
+            media_type=content_type.partition(";")[0].strip().lower()
+            if media_type not in {"application/x-netcdf", "application/netcdf"}:
+                raise RuntimeError(
+                    f"NCSS response is not NetCDF-compatible: HTTP {response.status_code}; "
+                    f"content-type={content_type!r}; final request URL={final_url}")
+            if not response.content:
+                raise RuntimeError(f"NCSS response body is empty; final request URL={final_url}")
+            if not response.content.startswith((b"CDF\x01",b"CDF\x02")):
+                raise RuntimeError(
+                    f"NCSS response has invalid NetCDF signature; content-type={content_type!r}; "
+                    f"final request URL={final_url}")
             tmp=path.with_suffix(path.suffix+".part"); tmp.write_bytes(response.content); tmp.replace(path)
             retrieved=datetime.now(timezone.utc).isoformat()
             sidecar.write_text(json.dumps({"ncss_request_url":url,"retrieved_at_utc":retrieved,
@@ -200,7 +219,8 @@ def _validate_units(data_array, field):
 def extract(path,variables,stations,parsed):
     import xarray as xr
     rows=[]
-    with xr.open_dataset(path) as ds:
+    # NCSS Grid returns classic/64-bit-offset NetCDF-3, not HDF5-backed NetCDF-4.
+    with xr.open_dataset(path,engine="scipy") as ds:
         lat_name=next(n for n in ("lat","latitude") if n in ds.coords)
         lon_name=next(n for n in ("lon","longitude") if n in ds.coords)
         for station in stations.itertuples():
