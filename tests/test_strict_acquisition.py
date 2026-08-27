@@ -171,19 +171,35 @@ class StrictAcquisitionTests(unittest.TestCase):
                       "lat": [35.], "lon": [-120.]}
             def field(values, units):
                 return xr.DataArray(np.asarray(values).reshape(2, 1, 1), dims=("height", "lat", "lon"), coords=coords, attrs={"units": units})
+            statistical_time = xr.DataArray(
+                [27.], dims="time1", attrs={
+                    "units": "hours since 2025-11-30T00:00:00Z",
+                    "standard_name": "time",
+                    "bounds": "time1_bounds",
+                })
+            statistical_coords = {"time1": statistical_time, "lat": [35.], "lon": [-120.]}
+            # Verified live semantics: f030 bounds [24,30] -> 6 hours.
+            # The following f033 bounds [30,33] -> 3 hours, so the products are adjacent.
             ds=xr.Dataset({"t": field([280., 999.], "K"), "rh": field([45., 999.], "%"),
                            "u": field([999., 3.], "m/s"), "v": field([999., 4.], "m/s"),
                            "cloud": (("lat","lon"), [[50.]]),
-                           "precip": (("lat","lon"), [[3.]]), "solar": (("lat","lon"), [[100.]])})
-            ds["precip"].attrs["description"]="0-3 hour accumulation"
-            ds["solar"].attrs["description"]="0-3 hour average"
+                           "precip": xr.DataArray([[[3.]]], dims=("time1", "lat", "lon"),
+                                                  coords=statistical_coords),
+                           "solar": xr.DataArray([[[100.]]], dims=("time1", "lat", "lon"),
+                                                 coords=statistical_coords),
+                           "time1_bounds": xr.DataArray([[24., 30.]], dims=("time1", "bounds"))})
+            ds["precip"].attrs["description"]="24-30 hour accumulation"
+            ds["solar"].attrs["description"]="24-30 hour average"
             ds.to_netcdf(path, engine="scipy")
             variables={"temperature_2m":"t", "relative_humidity_2m":"rh", "u_wind_10m":"u", "v_wind_10m":"v",
                        "cloud_cover":"cloud", "precipitation":"precip", "shortwave_radiation":"solar"}
             stations=pd.DataFrame({"station_name":["X"], "latitude":[35.], "longitude":[-120.], "population_weight":[1.]})
-            row=gdex_script.extract(path,variables,stations,{})[0]
+            parsed = parse_gdex_name("gfs.0p25.2025113000.f030.grib2")
+            row=gdex_script.extract(path,variables,stations,parsed)[0]
             self.assertAlmostEqual(6.85,row["temperature_2m"])
             self.assertEqual((45.,3.,4.),(row["relative_humidity_2m"],row["u_wind_10m"],row["v_wind_10m"]))
+            self.assertEqual(6., row["precipitation_period_hours"])
+            self.assertEqual(6., row["shortwave_period_hours"])
 
     def test_acquisition_module_entrypoints_import_from_repository_root(self):
         repository_root = Path(__file__).resolve().parents[1]
@@ -364,13 +380,19 @@ class StrictAcquisitionTests(unittest.TestCase):
         self.assertNotIn(pd.Timestamp("2025-12-01T05:00Z"), hourly.index)
 
     def test_six_hour_intervals_preserve_total_and_average_at_boundary(self):
-        frame=self.grid_frame().assign(precipitation_period_hours=6,
-                                       shortwave_period_hours=6)
+        # Verified live semantics: f030 bounds [24,30] -> 6 hours, while f033
+        # bounds [30,33] -> 3 hours. These adjacent intervals do not overlap.
+        frame=self.grid_frame().assign(precipitation_period_hours=[6,3,3],
+                                       shortwave_period_hours=[6,3,3])
         hourly=hourly_from_gdex(frame).set_index("valid_time_utc")
         # Only 06Z is in the output from the first [01Z, 06Z] convention interval,
         # but its total remains divided by all six represented hours.
         self.assertEqual(.5,hourly.loc[pd.Timestamp("2025-12-01T06:00Z"),"precipitation"])
         self.assertEqual(100.,hourly.loc[pd.Timestamp("2025-12-01T06:00Z"),"shortwave_radiation"])
+        for hour in (7, 8, 9):
+            timestamp = pd.Timestamp(f"2025-12-01T{hour:02d}:00Z")
+            self.assertEqual(2., hourly.loc[timestamp, "precipitation"])
+            self.assertEqual(400., hourly.loc[timestamp, "shortwave_radiation"])
         self.assertEqual(pd.Timestamp("2025-12-01T06:00Z"),hourly.index.min())
         self.assertNotIn(pd.Timestamp("2025-12-01T05:00Z"),hourly.index)
 
