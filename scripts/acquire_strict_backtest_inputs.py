@@ -17,12 +17,12 @@ def main() -> int:
     parser.add_argument("--gdex-source-document", action="append", required=True)
     args = parser.parse_args()
     root = Path(args.output_root)
-    caiso = [sys.executable, "scripts/acquire_december_2025_caiso.py", "--month", args.month,
+    caiso = [sys.executable, "-m", "scripts.acquire_december_2025_caiso", "--month", args.month,
              "--output-root", str(root)]
     for document in args.caiso_source_document:
         caiso.extend(["--source-document", document])
     subprocess.run(caiso, check=True)
-    gdex = [sys.executable, "scripts/acquire_gdex_gfs_0p25.py", "--month", args.month,
+    gdex = [sys.executable, "-m", "scripts.acquire_gdex_gfs_0p25", "--month", args.month,
             "--output-root", str(root), "--stations", args.stations]
     for document in args.gdex_source_document:
         gdex.extend(["--source-document", document])

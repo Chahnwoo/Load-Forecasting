@@ -64,7 +64,7 @@ Install `requirements.txt` (including xarray and netCDF4). First run this exact
 single-object smoke test; it retrieves only a CAISO-sized subset:
 
 ```bash
-python scripts/acquire_gdex_gfs_0p25.py --month 2025-12 --smoke-test \
+python -m scripts.acquire_gdex_gfs_0p25 --month 2025-12 --smoke-test \
   --stations data/stations_population_weights.csv \
   --source-document https://rda.ucar.edu/datasets/d084001/
 ```
@@ -72,7 +72,7 @@ python scripts/acquire_gdex_gfs_0p25.py --month 2025-12 --smoke-test \
 Then run the one-command acquisition and assembly workflow:
 
 ```bash
-python scripts/acquire_strict_backtest_inputs.py --month 2025-12 \
+python -m scripts.acquire_strict_backtest_inputs --month 2025-12 \
   --stations data/stations_population_weights.csv \
   --caiso-source-document /immutable/docs/caiso-1210-v19.8.pdf \
   --gdex-source-document https://rda.ucar.edu/datasets/d084001/
@@ -81,7 +81,7 @@ python scripts/acquire_strict_backtest_inputs.py --month 2025-12 \
 The weather-only acquisition command is:
 
 ```bash
-python scripts/acquire_gdex_gfs_0p25.py --month 2025-12 \
+python -m scripts.acquire_gdex_gfs_0p25 --month 2025-12 \
   --stations data/stations_population_weights.csv \
   --source-document https://rda.ucar.edu/datasets/d084001/
 ```
