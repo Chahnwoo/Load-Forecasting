@@ -18,6 +18,47 @@ from scripts import acquire_gdex_gfs_0p25 as gdex_script
 
 
 class StrictAcquisitionTests(unittest.TestCase):
+    def _statistical_dataset(self, lower=24., upper=30., *, field="precipitation",
+                             bounds_attr=True, include_bounds=True, bounds_values=None):
+        time=xr.DataArray([27.],dims=["time1"],attrs={"units":"hours since 2025-11-30 00:00:00"})
+        if bounds_attr: time.attrs["bounds"]="time1_bounds"
+        data=xr.DataArray([12.],dims=["time1"],coords={"time1":time})
+        variables={field:data}
+        if include_bounds:
+            values=np.array([[lower,upper]]) if bounds_values is None else np.asarray(bounds_values)
+            first_dim="time1" if values.shape[0] == 1 else "interval"
+            variables["time1_bounds"]=xr.DataArray(values,dims=[first_dim,"bounds"])
+        return xr.Dataset(variables)
+
+    def _parsed_f030(self):
+        return parse_gdex_name("gfs.0p25.2025113000.f030.grib2")
+
+    def test_ncss_cf_bounds_define_statistical_periods(self):
+        for field in ("precipitation","shortwave_radiation"):
+            with self.subTest(field=field):
+                ds=self._statistical_dataset(field=field)
+                result=gdex_script.statistical_time_bounds(ds,ds[field],self._parsed_f030(),field)
+                prefix="shortwave" if field == "shortwave_radiation" else field
+                self.assertEqual(24.,result[f"{prefix}_statistical_interval_start_lead_hours"])
+                self.assertEqual(30.,result[f"{prefix}_statistical_interval_end_lead_hours"])
+                self.assertEqual(6.,result[f"{prefix}_statistical_interval_hours"])
+                self.assertEqual(pd.Timestamp("2025-12-01T00:00Z"),result[f"{prefix}_statistical_interval_start_utc"])
+                self.assertEqual(pd.Timestamp("2025-12-01T06:00Z"),result[f"{prefix}_statistical_interval_end_utc"])
+        ds=self._statistical_dataset(27,30)
+        result=gdex_script.statistical_time_bounds(ds,ds.precipitation,self._parsed_f030(),"precipitation")
+        self.assertEqual(3.,result["precipitation_statistical_interval_hours"])
+
+    def test_ncss_cf_bounds_fail_closed(self):
+        cases=[(self._statistical_dataset(24,27),"does not match backing-object"),
+               (self._statistical_dataset(bounds_attr=False),"bounds attribute"),
+               (self._statistical_dataset(include_bounds=False),"is missing"),
+               (self._statistical_dataset(bounds_values=[[24,27],[27,30]]),"exactly one lower/upper pair"),
+               (self._statistical_dataset(30,30),"must be positive"),
+               (self._statistical_dataset(31,30),"must be positive")]
+        for ds,message in cases:
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError,message):
+                gdex_script.statistical_time_bounds(ds,ds.precipitation,self._parsed_f030(),"precipitation")
+
     def test_gdex_required_objects_bracket_three_hour_products(self):
         fixture = pd.DataFrame({
             "operating_day": ["fixture", "fixture"],
@@ -321,6 +362,17 @@ class StrictAcquisitionTests(unittest.TestCase):
         self.assertEqual(pd.Timestamp("2025-12-01T06:00Z"), hourly.index.min())
         self.assertEqual(pd.Timestamp("2025-12-01T12:00Z"), hourly.index.max())
         self.assertNotIn(pd.Timestamp("2025-12-01T05:00Z"), hourly.index)
+
+    def test_six_hour_intervals_preserve_total_and_average_at_boundary(self):
+        frame=self.grid_frame().assign(precipitation_period_hours=6,
+                                       shortwave_period_hours=6)
+        hourly=hourly_from_gdex(frame).set_index("valid_time_utc")
+        # Only 06Z is in the output from the first [01Z, 06Z] convention interval,
+        # but its total remains divided by all six represented hours.
+        self.assertEqual(.5,hourly.loc[pd.Timestamp("2025-12-01T06:00Z"),"precipitation"])
+        self.assertEqual(100.,hourly.loc[pd.Timestamp("2025-12-01T06:00Z"),"shortwave_radiation"])
+        self.assertEqual(pd.Timestamp("2025-12-01T06:00Z"),hourly.index.min())
+        self.assertNotIn(pd.Timestamp("2025-12-01T05:00Z"),hourly.index)
 
     def test_incomplete_cycle_and_bad_accumulation_fail(self):
         incomplete = self.grid_frame().drop(index=1)

@@ -175,20 +175,52 @@ def download(session,url,path,retries=4):
             if attempt+1==retries: raise
             time.sleep(2**attempt)
 
-def interval_hours(attrs, field):
-    text=" ".join(str(v) for v in attrs.values())
-    matches=re.findall(r"(\d+)\s*[-–]\s*(\d+)\s*hour",text,re.I)
-    if matches:
-        start,end=map(int,matches[-1]); period=end-start
+def statistical_time_bounds(ds, data_array, parsed, field):
+    """Return authoritative CF interval leads for one NCSS backing object."""
+    time_coordinates=[coord for coord in data_array.coords.values() if coord.name in data_array.dims and (
+        coord.name.lower().startswith("time") or
+        str(coord.attrs.get("standard_name", "")).lower() == "time" or
+        str(coord.attrs.get("axis", "")).upper() == "T")]
+    if len(time_coordinates) != 1:
+        raise RuntimeError(f"{field} expected one associated time coordinate; found {[c.name for c in time_coordinates]}")
+    candidates=[coord for coord in time_coordinates if coord.attrs.get("bounds")]
+    if len(candidates) != 1:
+        raise RuntimeError(f"{field} expected one time coordinate with a bounds attribute; found {[c.name for c in candidates]}")
+    coordinate=candidates[0]
+    bounds_name=str(coordinate.attrs["bounds"])
+    if bounds_name not in ds.variables:
+        raise RuntimeError(f"{field} time bounds variable {bounds_name!r} is missing")
+    bounds=ds[bounds_name]
+    if bounds.shape != (1,2):
+        raise RuntimeError(f"{field} time bounds must contain exactly one lower/upper pair; shape is {bounds.shape}")
+    raw=bounds.values.reshape(-1)
+    init=pd.Timestamp(parsed["model_init_time_utc"])
+    if init.tzinfo is None: init=init.tz_localize("UTC")
+    else: init=init.tz_convert("UTC")
+    if pd.api.types.is_datetime64_any_dtype(raw.dtype):
+        leads=[(pd.Timestamp(value).tz_localize("UTC")-init).total_seconds()/3600 for value in raw]
     else:
-        statistical_text=" ".join(f"{key} {value}" for key,value in attrs.items()
-                                  if any(token in str(key).lower() for token in ("interval","duration","statistical")))
-        durations=re.findall(r"(?:interval|duration|statistical)[^\d]{0,40}(\d+)\s*hour|\b(\d+)\s*hour[^,;]*(?:accumulation|average)",statistical_text or text,re.I)
-        values=[int(a or b) for a,b in durations]
-        if len(set(values)) != 1: raise RuntimeError(f"{field} lacks a GRIB statistical interval in NCSS metadata: {attrs}")
-        period=values[0]
-    if period<=0: raise RuntimeError(f"invalid {field} interval: {attrs}")
-    return period
+        units=str(bounds.attrs.get("units") or coordinate.attrs.get("units", "")).lower()
+        unit_match=re.match(r"^hours?\s+since\s+(.+)$",units)
+        if not unit_match:
+            raise RuntimeError(f"{field} time bounds require hour units; got {units!r}")
+        try: reference=pd.Timestamp(unit_match.group(1))
+        except ValueError as exc: raise RuntimeError(f"{field} has invalid CF time units {units!r}") from exc
+        if reference.tzinfo is None: reference=reference.tz_localize("UTC")
+        else: reference=reference.tz_convert("UTC")
+        leads=[((reference+pd.Timedelta(hours=float(value)))-init).total_seconds()/3600 for value in raw]
+    lower,upper=leads; period=upper-lower
+    if not period > 0:
+        raise RuntimeError(f"{field} statistical interval must be positive; bounds are {leads}")
+    expected=float(parsed["forecast_lead_hours"])
+    if upper != expected:
+        raise RuntimeError(f"{field} interval endpoint {upper:g} does not match backing-object forecast lead {expected:g}")
+    prefix="shortwave" if field == "shortwave_radiation" else field
+    return {f"{prefix}_statistical_interval_start_lead_hours":lower,
+            f"{prefix}_statistical_interval_end_lead_hours":upper,
+            f"{prefix}_statistical_interval_hours":period,
+            f"{prefix}_statistical_interval_start_utc":init+pd.Timedelta(hours=lower),
+            f"{prefix}_statistical_interval_end_utc":init+pd.Timedelta(hours=upper)}
 
 def _select_height(data_array, desired_metres, field):
     """Select the DataArray's own vertical coordinate, never a guessed name."""
@@ -223,6 +255,9 @@ def extract(path,variables,stations,parsed):
     with xr.open_dataset(path,engine="scipy") as ds:
         lat_name=next(n for n in ("lat","latitude") if n in ds.coords)
         lon_name=next(n for n in ("lon","longitude") if n in ds.coords)
+        statistical={}
+        for field in ("precipitation","shortwave_radiation"):
+            statistical.update(statistical_time_bounds(ds,ds[variables[field]],parsed,field))
         for station in stations.itertuples():
             lon=station.longitude % 360 if float(ds[lon_name].max())>180 else station.longitude
             values={}
@@ -236,8 +271,9 @@ def extract(path,variables,stations,parsed):
                 if value.size != 1: raise RuntimeError(f"{field} did not reduce to one grid value; dimensions are {value.dims}")
                 values[field]=float(value.values)
             values["temperature_2m"]-=273.15
-            values["precipitation_period_hours"]=interval_hours(ds[variables["precipitation"]].attrs,"precipitation")
-            values["shortwave_period_hours"]=interval_hours(ds[variables["shortwave_radiation"]].attrs,"shortwave")
+            values.update(statistical)
+            values["precipitation_period_hours"]=statistical["precipitation_statistical_interval_hours"]
+            values["shortwave_period_hours"]=statistical["shortwave_statistical_interval_hours"]
             rows.append({"station":station.station_name,"latitude":station.latitude,"longitude":station.longitude,
                 "population_weight":station.population_weight,**parsed,**values})
     return rows
