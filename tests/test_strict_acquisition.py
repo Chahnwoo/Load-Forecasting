@@ -8,19 +8,28 @@ import pandas as pd
 from src.backtesting.acquisition import (NCEI_GRID004_SOURCE, caiso_request,
                                          grid004_object_url, hourly_from_grid004,
                                          parse_grid004_name, sha256_file, write_manifest)
-from scripts.acquire_december_2025_caiso import normalize
+from scripts.acquire_december_2025_caiso import normalize, raw_identifiers
 from src.backtesting.strict_dataset import ACTUAL_ITEM, DAM_ITEM
 
 
 class StrictAcquisitionTests(unittest.TestCase):
     def test_caiso_request_is_exact_and_encoded(self):
         url, params = caiso_request(pd.Timestamp("2025-12-01T08:00Z"),
-                                    pd.Timestamp("2025-12-02T08:00Z"))
+                                    pd.Timestamp("2025-12-02T08:00Z"),
+                                    market_run_id="DAM")
         self.assertEqual("SLD_FCST", params["queryname"])
         self.assertEqual("DAM", params["market_run_id"])
         self.assertEqual("20251201T08:00-0000", params["startdatetime"])
         self.assertIn("oasis.caiso.com/oasisapi/SingleZip?", url)
         self.assertNotIn("load_mw", url)
+        actual_url, actual_params = caiso_request(
+            pd.Timestamp("2025-12-01T08:00Z"), pd.Timestamp("2025-12-02T08:00Z"),
+            market_run_id="ACTUAL")
+        self.assertEqual("ACTUAL", actual_params["market_run_id"])
+        self.assertIn("market_run_id=ACTUAL", actual_url)
+        with self.assertRaisesRegex(ValueError, "ACTUAL, DAM"):
+            caiso_request(pd.Timestamp("2025-12-01T08:00Z"),
+                          pd.Timestamp("2025-12-02T08:00Z"), market_run_id="RTM")
 
     def test_grid004_object_parsing(self):
         name = "gfs_4_20251201_0000_057.grb2"
@@ -33,16 +42,33 @@ class StrictAcquisitionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_grid004_name("gfs_3_20251201_0000_057.grb2")
 
-    def test_exact_oasis_contract_filtering(self):
-        fixture = pd.DataFrame({"INTERVALSTARTTIME_GMT": ["2025-12-01T08:00Z"] * 3,
-                                "TAC_AREA_NAME": ["CA ISO-TAC", "PGE-TAC", "CA ISO-TAC"],
-                                "DATA_ITEM": [ACTUAL_ITEM, ACTUAL_ITEM, DAM_ITEM],
-                                "MARKET_RUN_ID": ["RTM", "RTM", "DAM"], "MW": [1, 2, 3]})
+    def test_real_oasis_contract_filtering_and_provenance(self):
+        fixture = pd.DataFrame({"INTERVALSTARTTIME_GMT": ["2025-12-01T08:00Z"] * 6,
+                                "INTERVALENDTIME_GMT": ["2025-12-01T09:00Z"] * 6,
+                                "TAC_AREA_NAME": ["CA ISO-TAC", "PGE-TAC", "CA ISO-TAC",
+                                                  "CA ISO-TAC", "CA ISO-TAC", "CA ISO-TAC"],
+                                "XML_DATA_ITEM": [ACTUAL_ITEM, ACTUAL_ITEM, DAM_ITEM,
+                                                  ACTUAL_ITEM, DAM_ITEM, DAM_ITEM],
+                                "MARKET_RUN_ID": ["ACTUAL", "ACTUAL", "DAM",
+                                                  "DAM", "ACTUAL", "RTM"],
+                                "LABEL": ["fixture"] * 6, "MW": [1, 2, 3, 4, 5, 6]})
         actual = normalize(fixture, ACTUAL_ITEM)
         dam = normalize(fixture, DAM_ITEM)
         self.assertEqual([1], actual.mw.tolist())
         self.assertEqual([3], dam.mw.tolist())
         self.assertEqual({"CA ISO-TAC"}, set(actual.tac_area_name))
+        identifiers = raw_identifiers(fixture)
+        self.assertIn({"TAC_AREA_NAME": "CA ISO-TAC", "XML_DATA_ITEM": ACTUAL_ITEM,
+                       "MARKET_RUN_ID": "ACTUAL"}, identifiers)
+        self.assertTrue(all(set(value) == {"TAC_AREA_NAME", "XML_DATA_ITEM", "MARKET_RUN_ID"}
+                            for value in identifiers))
+
+    def test_historical_data_item_fallback(self):
+        fixture = pd.DataFrame({"INTERVALSTARTTIME_GMT": ["2025-12-01T08:00Z"],
+                                "TAC_AREA_NAME": ["CA ISO-TAC"], "DATA_ITEM": [DAM_ITEM],
+                                "MARKET_RUN_ID": ["DAM"], "MW": [3]})
+        self.assertEqual([3], normalize(fixture, DAM_ITEM).mw.tolist())
+        self.assertEqual(DAM_ITEM, raw_identifiers(fixture)[0]["XML_DATA_ITEM"])
 
     def test_checksum_and_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

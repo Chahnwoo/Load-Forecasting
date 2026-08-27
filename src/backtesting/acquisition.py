@@ -28,8 +28,12 @@ def sha256_file(path: str | Path) -> str:
     return "sha256:" + digest.hexdigest()
 
 
-def caiso_request(start_utc: pd.Timestamp, end_utc: pd.Timestamp) -> tuple[str, dict[str, str]]:
+def caiso_request(start_utc: pd.Timestamp, end_utc: pd.Timestamp,
+                  market_run_id: str = "DAM") -> tuple[str, dict[str, str]]:
     """Return the exact OASIS request used for one immutable raw response."""
+    if market_run_id not in {"DAM", "ACTUAL"}:
+        raise ValueError("CAISO market_run_id must be one of: ACTUAL, DAM")
+
     def oasis_time(value: pd.Timestamp) -> str:
         return pd.Timestamp(value).tz_convert("UTC").strftime("%Y%m%dT%H:%M-0000")
 
@@ -39,7 +43,7 @@ def caiso_request(start_utc: pd.Timestamp, end_utc: pd.Timestamp) -> tuple[str, 
         "enddatetime": oasis_time(end_utc),
         "version": "1",
         "resultformat": "6",
-        "market_run_id": "DAM",
+        "market_run_id": market_run_id,
     }
     return f"{CAISO_ENDPOINT}?{urlencode(params)}", params
 

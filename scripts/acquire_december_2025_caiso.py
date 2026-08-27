@@ -61,20 +61,40 @@ def read_oasis_zip(path: Path) -> pd.DataFrame:
 
 def normalize(rows: pd.DataFrame, item: str) -> pd.DataFrame:
     columns = {str(c).upper(): c for c in rows.columns}
-    required = {"INTERVALSTARTTIME_GMT", "TAC_AREA_NAME", "DATA_ITEM", "MW"}
+    report_item = columns.get("XML_DATA_ITEM", columns.get("DATA_ITEM"))
+    required = {"INTERVALSTARTTIME_GMT", "TAC_AREA_NAME", "MARKET_RUN_ID", "MW"}
     if required - set(columns):
         raise RuntimeError(f"OASIS response missing columns: {sorted(required - set(columns))}")
+    if report_item is None:
+        raise RuntimeError("OASIS response missing columns: ['XML_DATA_ITEM']")
+    expected_market = {DAM_ITEM: "DAM", ACTUAL_ITEM: "ACTUAL"}.get(item)
+    if expected_market is None:
+        raise ValueError(f"unsupported CAISO report item: {item}")
     out = pd.DataFrame({"interval_start_utc": rows[columns["INTERVALSTARTTIME_GMT"]],
                         "tac_area_name": rows[columns["TAC_AREA_NAME"]],
-                        "data_item": rows[columns["DATA_ITEM"]], "mw": rows[columns["MW"]]})
-    out = out[(out.tac_area_name == ENTITY) & (out.data_item == item)].copy()
+                        "data_item": rows[report_item],
+                        "market_run_id": rows[columns["MARKET_RUN_ID"]],
+                        "mw": rows[columns["MW"]]})
+    out = out[(out.tac_area_name == ENTITY) & (out.data_item == item)
+              & (out.market_run_id == expected_market)].copy()
     out["interval_start_utc"] = pd.to_datetime(out.interval_start_utc, utc=True)
-    if item == DAM_ITEM:
-        if "MARKET_RUN_ID" not in columns:
-            raise RuntimeError("DAM response lacks MARKET_RUN_ID")
-        market = rows.loc[out.index, columns["MARKET_RUN_ID"]]
-        out = out.loc[market.eq("DAM").to_numpy()]
     return out
+
+
+def raw_identifiers(rows: pd.DataFrame) -> list[dict[str, str]]:
+    """Return canonical raw identifiers from a current or historical response."""
+    columns = {str(c).upper(): c for c in rows.columns}
+    report_item = columns.get("XML_DATA_ITEM", columns.get("DATA_ITEM"))
+    required = {"TAC_AREA_NAME", "MARKET_RUN_ID"}
+    if required - set(columns) or report_item is None:
+        missing = sorted(required - set(columns))
+        if report_item is None:
+            missing.append("XML_DATA_ITEM")
+        raise RuntimeError(f"OASIS response missing raw identifier columns: {missing}")
+    identifiers = rows[[columns["TAC_AREA_NAME"], report_item,
+                        columns["MARKET_RUN_ID"]]].copy()
+    identifiers.columns = ["TAC_AREA_NAME", "XML_DATA_ITEM", "MARKET_RUN_ID"]
+    return identifiers.drop_duplicates().astype(str).to_dict("records")
 
 
 def main() -> int:
@@ -94,23 +114,20 @@ def main() -> int:
     with requests.Session() as session:
         for utc_day, group in acquisition_times.groupby(acquisition_times.dt.strftime("%Y-%m-%d")):
             start, end = group.min(), group.max() + pd.Timedelta(hours=1)
-            url, params = caiso_request(start, end)
-            target = raw_dir / f"oasis_sld_fcst_{utc_day}.zip"
-            retrieved = download(session, url, target)
-            response_rows = read_oasis_zip(target)
-            frames.append(response_rows)
-            upper = {str(c).upper(): c for c in response_rows.columns}
-            identifiers = []
-            if {"TAC_AREA_NAME", "DATA_ITEM"} <= set(upper):
-                identifiers = (response_rows[[upper["TAC_AREA_NAME"], upper["DATA_ITEM"]]]
-                               .drop_duplicates().astype(str).to_dict("records"))
-            records.append({"source": "caiso-oasis", "endpoint": url.split("?")[0],
-                            "request_url": url, "request_parameters": params,
-                            "retrieved_at_utc": retrieved, "source_filename": target.name,
-                            "local_path": str(target), "checksum": sha256_file(target),
-                            "raw_identifiers": identifiers,
-                            "interval_start_utc": str(start), "interval_end_utc_exclusive": str(end),
-                            "applicable_procedure": "CAISO 1210 v19.8 (effective 2025-10-01)"})
+            for market_run_id in ("DAM", "ACTUAL"):
+                url, params = caiso_request(start, end, market_run_id=market_run_id)
+                target = raw_dir / f"oasis_sld_fcst_{market_run_id.lower()}_{utc_day}.zip"
+                retrieved = download(session, url, target)
+                response_rows = read_oasis_zip(target)
+                frames.append(response_rows)
+                records.append({"source": "caiso-oasis", "endpoint": url.split("?")[0],
+                                "request_url": url, "request_parameters": params,
+                                "retrieved_at_utc": retrieved, "source_filename": target.name,
+                                "local_path": str(target), "checksum": sha256_file(target),
+                                "raw_identifiers": raw_identifiers(response_rows),
+                                "interval_start_utc": str(start),
+                                "interval_end_utc_exclusive": str(end),
+                                "applicable_procedure": "CAISO 1210 v19.8 (effective 2025-10-01)"})
     raw = pd.concat(frames, ignore_index=True)
     wanted = set(expected.time_utc)
     for item, filename in ((ACTUAL_ITEM, "actuals.csv"), (DAM_ITEM, "caiso_dam.csv")):
