@@ -6,17 +6,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 import pandas as pd
 import requests
-from xml.etree import ElementTree
 from src.backtesting.acquisition import (GDEX_DATASET, GDEX_MODEL, GDEX_REFERENCE, GDEX_SOURCE,
-    gdex_ncss_url, gdex_object_url, hourly_from_gdex, parse_gdex_name, sha256_file, write_manifest)
+    GDEX_ROOT, gdex_ncss_url, gdex_object_url, hourly_from_gdex, parse_gdex_name, sha256_file, write_manifest)
 from src.backtesting.strict_dataset import operating_intervals
 
 CANONICAL_VARIABLES = {
  "temperature_2m": "Temperature_height_above_ground",
  "relative_humidity_2m": "Relative_humidity_height_above_ground",
- "cloud_cover": "Total_cloud_cover_entire_atmosphere",
  "u_wind_10m": "u-component_of_wind_height_above_ground",
  "v_wind_10m": "v-component_of_wind_height_above_ground",
+}
+
+STATISTICAL_VARIABLES = {
+ "cloud_cover": ("Total cloud cover", "Entire atmosphere", None),
+ "precipitation": ("Total precipitation", "Ground or water surface", "Accumulation"),
+ "shortwave_radiation": ("Downward Short-Wave Radiation Flux", "Ground or water surface", "Average"),
 }
 
 def required_objects(month):
@@ -35,31 +39,85 @@ def required_objects(month):
                 names.add(f"gfs.0p25.{cycle:%Y%m%d%H}.f{product_lead:03d}.grib2")
     return sorted(names)
 
+def _opendap_das_url(name):
+    parsed=parse_gdex_name(name); day=parsed["model_init_time_utc"].strftime("%Y%m%d")
+    return (f"{GDEX_ROOT}/dodsC/files/g/{GDEX_DATASET}/{day[:4]}/{day}/"
+            f"{parsed['filename']}.das")
+
+def _das_variables(content):
+    """Read top-level OPeNDAP DAS variable blocks and their scalar attributes."""
+    text=content.decode("utf-8") if isinstance(content,bytes) else content
+    opening=text.find("{")
+    if opening < 0: raise RuntimeError("OPeNDAP DAS has no Attributes block")
+    variables=[]; position=opening+1
+    block_start=re.compile(r"([^\s{}]+)\s*\{")
+    attribute=re.compile(r'\b(?:Byte|Int\d+|UInt\d+|Float\d+|String|Url)\s+([^\s]+)\s+(.+?)\s*;',re.S)
+    while match := block_start.search(text,position):
+        depth=1; cursor=match.end(); quoted=False; escaped=False
+        while cursor < len(text) and depth:
+            char=text[cursor]
+            if quoted:
+                if escaped: escaped=False
+                elif char == "\\": escaped=True
+                elif char == '"': quoted=False
+            elif char == '"': quoted=True
+            elif char == "{": depth+=1
+            elif char == "}": depth-=1
+            cursor+=1
+        if depth: raise RuntimeError(f"unterminated OPeNDAP DAS block {match.group(1)!r}")
+        body=text[match.end():cursor-1]; attrs={}
+        for item in attribute.finditer(body):
+            value=item.group(2).strip()
+            quoted_values=re.findall(r'"((?:\\.|[^"\\])*)"',value)
+            attrs[item.group(1)]=", ".join(v.replace('\\"','"') for v in quoted_values) if quoted_values else value
+        variables.append((match.group(1),attrs)); position=cursor
+    return variables
+
+def _metadata_value(attrs, *names):
+    lowered={key.lower():str(value).strip() for key,value in attrs.items()}
+    return next((lowered[name.lower()] for name in names if name.lower() in lowered),"")
+
+def _normal(value):
+    return " ".join(re.sub(r"[^a-z0-9]+"," ",value.lower()).split())
+
+def _diagnostic(variables, terms):
+    related=[]
+    words=set(_normal(" ".join(terms)).split())
+    for name,attrs in variables:
+        parameter=_metadata_value(attrs,"Grib2_Parameter_Name")
+        if words & set(_normal(name+" "+parameter).split()):
+            related.append({"name":name,"parameter":parameter,
+                "level":_metadata_value(attrs,"Grib2_Level_Desc","Grib2_Level_Type"),
+                "statistical_process":_metadata_value(attrs,"Grib2_Statistical_Process_Type","Grib_Statistical_Interval_Type"),
+                "units":_metadata_value(attrs,"units")})
+    return related[:20]
+
 def discover_variables(session, name):
-    url,_=gdex_ncss_url(name,["placeholder"],north=42,south=32,east=-114,west=-125)
-    endpoint=url.split("?",1)[0]+"/dataset.xml"
+    endpoint=_opendap_das_url(name)
     response=session.get(endpoint,timeout=(20,120)); response.raise_for_status()
-    root=ElementTree.fromstring(response.content); variables=[]
-    for node in root.iter():
-        if node.tag.rsplit("}",1)[-1].lower() == "variable":
-            key=node.attrib.get("name") or node.attrib.get("vocabulary_name")
-            if key: variables.append((key,dict(node.attrib)))
+    variables=_das_variables(response.content)
     found={}
     for field, canonical in CANONICAL_VARIABLES.items():
         candidates=[name for name,_ in variables if name == canonical]
-        if len(candidates)!=1: raise RuntimeError(f"NCSS metadata expected one {field}, found {candidates}")
+        if len(candidates)!=1:
+            detail=_diagnostic(variables,canonical.split("_"))
+            raise RuntimeError(f"OPeNDAP metadata expected one {field}, found {candidates}; candidates={detail}")
         found[field]=candidates[0]
-    statistical = {
-      "precipitation": (("total", "precipitation"), ("surface",), ("accum", "statistical")),
-      "shortwave_radiation": (("downward", "short", "wave", "radiation"), ("surface",), ("average", "statistical")),
-    }
-    for field,(parameter,level,stat_kinds) in statistical.items():
+    for field,(parameter,level,process) in STATISTICAL_VARIABLES.items():
         candidates=[]
-        for name,attrs in variables:
-            text=" ".join([name,*map(str,attrs.values())]).lower().replace("_"," ").replace("-"," ")
-            if all(word in text for word in parameter) and all(word in text for word in level) and any(kind in text for kind in stat_kinds):
-                candidates.append(name)
-        if len(candidates)!=1: raise RuntimeError(f"NCSS metadata expected one {field}, found {candidates}")
+        for variable,attrs in variables:
+            actual_parameter=_metadata_value(attrs,"Grib2_Parameter_Name")
+            actual_level=_metadata_value(attrs,"Grib2_Level_Desc","Grib2_Level_Type")
+            actual_process=" ".join(filter(None,(
+                _metadata_value(attrs,"Grib2_Statistical_Process_Type"),
+                _metadata_value(attrs,"Grib_Statistical_Interval_Type"))))
+            if (_normal(actual_parameter)==_normal(parameter) and
+                    _normal(level) in _normal(actual_level) and
+                    (process is None or _normal(process) in _normal(actual_process))):
+                candidates.append(variable)
+        if len(candidates)!=1:
+            detail=_diagnostic(variables,(parameter,level,process or ""))
+            raise RuntimeError(f"OPeNDAP metadata expected one {field}, found {candidates}; candidates={detail}")
         found[field]=candidates[0]
     return found, endpoint
 
@@ -169,6 +227,7 @@ def main():
         for row in extract(target,variables,stations,parsed):
           row.update(source=GDEX_SOURCE,model=GDEX_MODEL,dataset=GDEX_DATASET,dataset_reference=GDEX_REFERENCE,
             backing_source_object=name,backing_fileserver_url=gdex_object_url(name),ncss_request_url=request_url,
+            metadata_url=metadata_url,
             raw_subset_local_filename=str(target),subset_retrieved_at_utc=retrieved,checksum=checksum,
             source_object=request_url,available_at_utc=parsed["model_init_time_utc"]+pd.Timedelta(hours=10),availability_policy="gfs_init_plus_10h_v1")
           extracted.append(row)
