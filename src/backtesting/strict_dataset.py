@@ -24,7 +24,7 @@ REALIZED_WEATHER_SOURCES = {
     "open-meteo-archive", "open_meteo_archive", "realized", "reanalysis",
     "noaa-arl-ready", "noaa-ready-gfs0p25",
 }
-STRICT_WEATHER_SOURCE = "noaa-ncei-gfs-0p25"
+STRICT_WEATHER_SOURCE = "noaa-ncei-gfs-grid004-0p5"
 
 
 class StrictDataError(ValueError):
@@ -126,13 +126,19 @@ def select_weather_vintages(weather: pd.DataFrame, origins: pd.DataFrame) -> pd.
     candidates = candidates[candidates["available_at_utc"] <= candidates["forecast_cutoff_utc"]]
     if candidates.empty or candidates["station"].isna().any():
         raise StrictDataError("no eligible archived weather forecast vintages at one or more origins")
-    candidates = candidates.sort_values(["model_init_time_utc", "available_at_utc"]).drop_duplicates(
+    # Select a cycle, not an independently newest row for each station.  The
+    # latter can silently mix cycles when one archive object/station is absent.
+    expected_stations = set(out["station"].dropna().unique())
+    counts = candidates.groupby(["valid_time_utc", "model_init_time_utc"])["station"].nunique()
+    complete = counts[counts == len(expected_stations)].reset_index()
+    newest = complete.groupby("valid_time_utc", as_index=False)["model_init_time_utc"].max()
+    selected = candidates.merge(newest, on=["valid_time_utc", "model_init_time_utc"], how="inner")
+    selected = selected.sort_values("available_at_utc").drop_duplicates(
         ["valid_time_utc", "station"], keep="last"
     )
-    cycles_per_valid = candidates.groupby("valid_time_utc")["model_init_time_utc"].nunique()
-    if cycles_per_valid.gt(1).any():
-        raise StrictDataError("stations for one valid time must use one identifiable GFS cycle")
-    return candidates.drop(columns="forecast_cutoff_utc").reset_index(drop=True)
+    if selected["valid_time_utc"].nunique() != len(keys):
+        raise StrictDataError("no complete single-cycle archived weather forecast at one or more origins")
+    return selected.drop(columns="forecast_cutoff_utc").reset_index(drop=True)
 
 
 def add_previous_week(origins: pd.DataFrame, load_history: pd.DataFrame) -> pd.DataFrame:
@@ -179,9 +185,27 @@ class StrictBacktestBuilder:
             "station", "model_init_time_utc", "forecast_lead_hours", "available_at_utc",
             "availability_policy", "valid_time_utc", "source", "model", "source_object",
             "checksum"}]
-        # Preserve station-level weather separately; model rows receive deterministic
-        # station means while retaining the oldest contributing issue for audit safety.
-        agg = {c: "mean" for c in weather_vars if pd.api.types.is_numeric_dtype(selected[c])}
+        # Preserve station-level weather separately.  Use repository station
+        # weights when supplied; an unweighted mean is only valid when no
+        # weights are present (principally for backwards-compatible fixtures).
+        numeric_weather = [c for c in weather_vars
+                           if c != "population_weight" and pd.api.types.is_numeric_dtype(selected[c])]
+        if "population_weight" in selected:
+            weights = pd.to_numeric(selected["population_weight"], errors="coerce")
+            if weights.isna().any() or (weights < 0).any():
+                raise StrictDataError("weather population_weight must be non-negative numeric values")
+            totals = selected.assign(_weight=weights).groupby("valid_time_utc")["_weight"].transform("sum")
+            if (totals <= 0).any():
+                raise StrictDataError("weather station weights must have a positive hourly total")
+            aggregation_frame = selected.copy()
+            aggregation_frame["_normalized_weight"] = weights / totals
+            for column in numeric_weather:
+                aggregation_frame[column] = aggregation_frame[column] * aggregation_frame["_normalized_weight"]
+            agg = {c: "sum" for c in numeric_weather}
+            agg["population_weight"] = "sum"
+        else:
+            aggregation_frame = selected
+            agg = {c: "mean" for c in numeric_weather}
         agg.update({"model_init_time_utc": "first", "forecast_lead_hours": "first",
                     "available_at_utc": "max",
                     "source": lambda x: "|".join(sorted(set(x))),
@@ -189,7 +213,7 @@ class StrictBacktestBuilder:
                     "availability_policy": lambda x: "|".join(sorted(set(x))),
                     "source_object": lambda x: "|".join(sorted(set(x))),
                     "checksum": lambda x: "|".join(sorted(set(x)))})
-        weather_hourly = selected.groupby("valid_time_utc", as_index=False).agg(agg).rename(
+        weather_hourly = aggregation_frame.groupby("valid_time_utc", as_index=False).agg(agg).rename(
             columns={"valid_time_utc": "time_utc",
                      "model_init_time_utc": "weather_model_init_time_utc",
                      "forecast_lead_hours": "weather_forecast_lead_hours",
@@ -215,6 +239,11 @@ class StrictBacktestBuilder:
         if rows.duplicated("time_utc").any() or rows.groupby("operating_day")["forecast_cutoff_utc"].nunique().ne(1).any():
             raise StrictDataError("origin or target interval uniqueness invariant failed")
         dam_out = forecast.rename(columns={"interval_start_utc": "time_utc", "mw": "caiso_dam_forecast_mw"})
+        expected = set(origins["time_utc"])
+        present = set(dam_out["time_utc"])
+        if expected - present:
+            raise StrictDataError("DAM SYS_FCST_DA_MW is incomplete for requested month")
+        dam_out = dam_out[dam_out["time_utc"].isin(expected)].reset_index(drop=True)
         return {"actuals": actual, "dam_forecasts": dam_out, "weather_vintages": selected,
                 "strict_rows": rows}
 

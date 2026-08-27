@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://load-forecasting.local/schemas/acquisition_manifest.schema.json",
+  "title": "Strict backtest acquisition manifest",
+  "type": "object",
+  "required": ["schema_version", "month", "created_at_utc", "source_documents", "acquisitions"],
+  "properties": {
+    "schema_version": {"const": "strict-acquisition-manifest-v1"},
+    "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "source_documents": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "acquisitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source", "checksum", "retrieved_at_utc"],
+        "properties": {
+          "source": {"enum": ["caiso-oasis", "noaa-ncei-gfs-grid004-0p5"]},
+          "checksum": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "retrieved_at_utc": {"type": "string", "format": "date-time"},
+          "source_object": {"type": "string"},
+          "model_init_time_utc": {"type": "string", "format": "date-time"},
+          "forecast_lead_hours": {"type": "integer", "minimum": 0, "maximum": 192},
+          "valid_time_utc": {"type": "string", "format": "date-time"},
+          "available_at_utc": {"type": "string", "format": "date-time"},
+          "availability_policy": {"type": "string", "minLength": 1},
+          "request_url": {"type": "string"},
+          "request_parameters": {"type": "object"}
+        }
+      }
+    }
+  }
+}
