@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the local strict CAISO and NCEI acquisition workflow."""
+"""Run the local strict CAISO and GDEX acquisition workflow."""
 
 import argparse
 import json
@@ -14,7 +14,7 @@ def main() -> int:
     parser.add_argument("--output-root", default="data/backtesting")
     parser.add_argument("--stations", default="data/stations_population_weights.csv")
     parser.add_argument("--caiso-source-document", action="append", required=True)
-    parser.add_argument("--ncei-source-document", action="append", required=True)
+    parser.add_argument("--gdex-source-document", action="append", required=True)
     args = parser.parse_args()
     root = Path(args.output_root)
     caiso = [sys.executable, "scripts/acquire_december_2025_caiso.py", "--month", args.month,
@@ -22,11 +22,11 @@ def main() -> int:
     for document in args.caiso_source_document:
         caiso.extend(["--source-document", document])
     subprocess.run(caiso, check=True)
-    ncei = [sys.executable, "scripts/acquire_ncei_gfs_grid004.py", "--month", args.month,
+    gdex = [sys.executable, "scripts/acquire_gdex_gfs_0p25.py", "--month", args.month,
             "--output-root", str(root), "--stations", args.stations]
-    for document in args.ncei_source_document:
-        ncei.extend(["--source-document", document])
-    subprocess.run(ncei, check=True)
+    for document in args.gdex_source_document:
+        gdex.extend(["--source-document", document])
+    subprocess.run(gdex, check=True)
     manifests = [json.loads((root / args.month / name).read_text()) for name in
                  ("acquisition_manifest.caiso.json", "acquisition_manifest.gfs.json")]
     combined = {"schema_version": "strict-acquisition-manifest-v1", "month": args.month,
