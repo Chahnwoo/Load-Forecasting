@@ -36,7 +36,7 @@ class StrictBacktestTests(unittest.TestCase):
             "available_at_utc": [cutoff - pd.Timedelta(hours=6), cutoff, cutoff + pd.Timedelta(hours=1)],
             "availability_policy": ["gfs_init_plus_10h_v1"] * 3,
             "valid_time_utc": [valid] * 3,
-            "source": ["noaa-ncei-gfs-0p25"] * 3,
+            "source": ["noaa-ncei-gfs-grid004-0p5"] * 3,
             "model": ["gfs"] * 3,
             "source_object": ["ncei/gfs/cycle-a/f027.grb2", "ncei/gfs/cycle-b/f021.grb2",
                               "ncei/gfs/cycle-c/f020.grb2"],
@@ -68,6 +68,9 @@ class StrictBacktestTests(unittest.TestCase):
         ready = weather.assign(source="noaa-arl-ready")
         with self.assertRaisesRegex(StrictDataError, "forbids realized"):
             select_weather_vintages(ready, origins)
+        retired_quarter_degree = weather.assign(source="noaa-ncei-gfs-0p25")
+        with self.assertRaisesRegex(StrictDataError, "strict weather source"):
+            select_weather_vintages(retired_quarter_degree, origins)
 
     def test_caiso_entity_item_and_unique_key_contract(self):
         base = pd.DataFrame({"interval_start_utc": ["2025-12-01T08:00:00Z"],
@@ -89,7 +92,7 @@ class StrictBacktestTests(unittest.TestCase):
                                 "model_init_time_utc": origins.forecast_cutoff_utc - pd.Timedelta(hours=8),
                                 "available_at_utc": origins.forecast_cutoff_utc - pd.Timedelta(hours=1),
                                 "availability_policy": "gfs_init_plus_10h_v1",
-                                "source": "noaa-ncei-gfs-0p25", "model": "gfs-0p25",
+                                "source": "noaa-ncei-gfs-grid004-0p5", "model": "gfs-grid004-0p5",
                                 "source_object": "ncei/gfs/full-cycle/f024.grb2",
                                 "checksum": "sha256:fixture",
                                 "temperature_2m": 18.0})
@@ -117,7 +120,7 @@ class StrictBacktestTests(unittest.TestCase):
                                 "model_init_time_utc": [cutoff - pd.Timedelta(hours=6)],
                                 "available_at_utc": [cutoff + pd.Timedelta(minutes=1)],
                                 "availability_policy": ["gfs_init_plus_10h_v1"],
-                                "source": ["noaa-ncei-gfs-0p25"], "model": ["gfs-0p25"],
+                                "source": ["noaa-ncei-gfs-grid004-0p5"], "model": ["gfs-grid004-0p5"],
                                 "forecast_lead_hours": [23.0],
                                 "source_object": ["ncei/gfs/cycle/f023.grb2"],
                                 "checksum": ["sha256:a"]})
@@ -126,6 +129,56 @@ class StrictBacktestTests(unittest.TestCase):
         impossible = weather.assign(available_at_utc=cutoff - pd.Timedelta(hours=7))
         with self.assertRaisesRegex(StrictDataError, "cannot precede"):
             select_weather_vintages(impossible, origins)
+
+    def test_weather_selection_uses_newest_complete_cycle(self):
+        origins = operating_intervals("2025-12").head(1)
+        valid = origins.time_utc.iloc[0]
+        cutoff = origins.forecast_cutoff_utc.iloc[0]
+        old = cutoff - pd.Timedelta(hours=12)
+        new = cutoff - pd.Timedelta(hours=10)
+        weather = pd.DataFrame({
+            "station": ["A", "B", "A"],
+            "model_init_time_utc": [old, old, new],
+            "available_at_utc": [cutoff - pd.Timedelta(hours=2)] * 2 + [cutoff],
+            "availability_policy": ["gfs_init_plus_10h_v1"] * 3,
+            "valid_time_utc": [valid] * 3,
+            "source": ["noaa-ncei-gfs-grid004-0p5"] * 3,
+            "model": ["gfs-grid004-0p5"] * 3,
+            "source_object": ["old-a", "old-b", "new-a"],
+            "checksum": ["sha256:a", "sha256:b", "sha256:c"],
+        })
+        weather["forecast_lead_hours"] = (
+            (weather.valid_time_utc - weather.model_init_time_utc).dt.total_seconds() / 3600
+        )
+        selected = select_weather_vintages(weather, origins)
+        self.assertEqual({old}, set(selected.model_init_time_utc))
+        self.assertEqual({"A", "B"}, set(selected.station))
+
+    def test_station_population_weights_are_used(self):
+        origins = operating_intervals("2025-12")
+        times = origins.time_utc
+        actual = pd.DataFrame({"interval_start_utc": times, "tac_area_name": ENTITY,
+                               "data_item": ACTUAL_ITEM, "mw": 20000.0})
+        dam = actual.assign(data_item=DAM_ITEM, mw=19900.0)
+        base = pd.DataFrame({"station": "A", "valid_time_utc": times,
+                             "model_init_time_utc": origins.forecast_cutoff_utc - pd.Timedelta(hours=10),
+                             "available_at_utc": origins.forecast_cutoff_utc,
+                             "availability_policy": "gfs_init_plus_10h_v1", "source": "noaa-ncei-gfs-grid004-0p5",
+                             "model": "gfs-grid004-0p5", "source_object": "a", "checksum": "sha256:a",
+                             "population_weight": .25, "temperature_2m": 10.0})
+        other = base.assign(station="B", source_object="b", checksum="sha256:b",
+                            population_weight=.75, temperature_2m=20.0)
+        weather = pd.concat([base, other], ignore_index=True)
+        weather["forecast_lead_hours"] = (
+            (weather.valid_time_utc - weather.model_init_time_utc).dt.total_seconds() / 3600
+        )
+        load = pd.DataFrame({"observation_time_utc": times - pd.Timedelta(days=7),
+                             "available_time_utc": origins.forecast_cutoff_utc,
+                             "load_mw": 19000.0})
+        products = StrictBacktestBuilder("2025-12").build(actual, dam, weather, load)
+        rows = products["strict_rows"]
+        self.assertTrue(rows.temperature_2m.eq(17.5).all())
+        self.assertEqual({10.0, 20.0}, set(products["weather_vintages"].temperature_2m))
 
 
 if __name__ == "__main__":
