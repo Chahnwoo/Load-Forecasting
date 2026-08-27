@@ -18,10 +18,11 @@ CANONICAL_VARIABLES = {
 }
 
 STATISTICAL_VARIABLES = {
- "cloud_cover": ("Total cloud cover", "Entire atmosphere", None),
  "precipitation": ("Total precipitation", "Ground or water surface", "Accumulation"),
  "shortwave_radiation": ("Downward Short-Wave Radiation Flux", "Ground or water surface", "Average"),
 }
+
+CLOUD_COVER_SEMANTICS = ("Total cloud cover", "Entire atmosphere", "UnknownStatType--1")
 
 def required_objects(month):
     names=set()
@@ -103,6 +104,20 @@ def discover_variables(session, name):
             detail=_diagnostic(variables,canonical.split("_"))
             raise RuntimeError(f"OPeNDAP metadata expected one {field}, found {candidates}; candidates={detail}")
         found[field]=candidates[0]
+    parameter,level,process=CLOUD_COVER_SEMANTICS
+    candidates=[]
+    for variable,attrs in variables:
+        actual_parameter=_metadata_value(attrs,"Grib2_Parameter_Name")
+        actual_level=_metadata_value(attrs,"Grib2_Level_Desc","Grib2_Level_Type")
+        actual_process=_metadata_value(attrs,"Grib2_Statistical_Process_Type")
+        if (_normal(actual_parameter)==_normal(parameter) and
+                _normal(level) in _normal(actual_level) and
+                _normal(actual_process)==_normal(process)):
+            candidates.append(variable)
+    if len(candidates)!=1:
+        detail=_diagnostic(variables,(parameter,level,process))
+        raise RuntimeError(f"OPeNDAP metadata expected one cloud_cover, found {candidates}; candidates={detail}")
+    found["cloud_cover"]=candidates[0]
     for field,(parameter,level,process) in STATISTICAL_VARIABLES.items():
         candidates=[]
         for variable,attrs in variables:

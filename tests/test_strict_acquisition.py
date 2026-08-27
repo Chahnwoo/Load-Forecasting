@@ -78,6 +78,29 @@ class StrictAcquisitionTests(unittest.TestCase):
                          found["precipitation"])
         self.assertEqual("Total_cloud_cover_entire_atmosphere", found["cloud_cover"])
 
+    def test_averaged_only_cloud_cover_fails_closed(self):
+        das = self._gdex_das().replace(
+            b'String Grib2_Statistical_Process_Type "UnknownStatType--1";',
+            b'String Grib2_Statistical_Process_Type "Average";',
+            1)
+        with self.assertRaisesRegex(RuntimeError, r"expected one cloud_cover, found \[\]"):
+            gdex_script.discover_variables(
+                self._gdex_metadata_session(das), "gfs.0p25.2025113000.f030.grib2")
+
+    def test_two_instantaneous_cloud_candidates_fail_closed(self):
+        duplicate = b"""
+    Other_instantaneous_cloud_cover {
+        String Grib2_Parameter_Name "Total cloud cover";
+        String Grib2_Level_Desc "Entire atmosphere";
+        String Grib2_Statistical_Process_Type "UnknownStatType--1";
+        String units "%";
+    }
+"""
+        das = self._gdex_das().replace(b"    NC_GLOBAL {", duplicate + b"    NC_GLOBAL {")
+        with self.assertRaisesRegex(RuntimeError, "expected one cloud_cover.*Other_instantaneous"):
+            gdex_script.discover_variables(
+                self._gdex_metadata_session(das), "gfs.0p25.2025113000.f030.grib2")
+
     def test_ambiguous_physical_metadata_matches_fail_closed_with_diagnostics(self):
         duplicate = b"""
     Other_shortwave_surface_3_Hour_Average {

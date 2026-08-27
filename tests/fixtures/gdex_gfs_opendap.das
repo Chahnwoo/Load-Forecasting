@@ -23,6 +23,15 @@ Attributes {
         String Grib2_Parameter_Name "Total cloud cover";
         String Grib2_Level_Type "Entire atmosphere";
         String Grib2_Level_Desc "Entire atmosphere (considered as a single layer)";
+        String Grib2_Statistical_Process_Type "UnknownStatType--1";
+        String units "%";
+    }
+    Total_cloud_cover_entire_atmosphere_6_Hour_Average {
+        String Grib2_Parameter_Name "Total cloud cover";
+        String Grib2_Level_Type "Entire atmosphere";
+        String Grib2_Level_Desc "Entire atmosphere (considered as a single layer)";
+        String Grib2_Statistical_Process_Type "Average";
+        String Grib_Statistical_Interval_Type "Average";
         String units "%";
     }
     Total_precipitation_surface_Mixed_intervals_Accumulation {
