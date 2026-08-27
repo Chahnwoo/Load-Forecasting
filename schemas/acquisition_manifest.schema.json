@@ -15,7 +15,7 @@
         "type": "object",
         "required": ["source", "checksum", "retrieved_at_utc"],
         "properties": {
-          "source": {"enum": ["caiso-oasis", "noaa-ncei-gfs-grid004-0p5"]},
+          "source": {"enum": ["caiso-oasis", "nsf-ncar-gdex-gfs-0p25"]},
           "checksum": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
           "retrieved_at_utc": {"type": "string", "format": "date-time"},
           "source_object": {"type": "string"},

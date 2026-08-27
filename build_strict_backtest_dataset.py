@@ -17,7 +17,7 @@ def main() -> int:
     parser.add_argument("--actuals-csv", required=True)
     parser.add_argument("--dam-csv", required=True)
     parser.add_argument("--weather-vintages-csv",
-                        help="NCEI DSI 6182 GFS Grid 004 (0.5 degree) full-cycle forecasts with provenance")
+                        help="NSF NCAR GDEX d084001 GFS 0.25-degree full-cycle NCSS subsets with provenance")
     parser.add_argument("--load-history-csv", required=True)
     parser.add_argument("--output-dir", default="data/strict_backtest")
     args = parser.parse_args()

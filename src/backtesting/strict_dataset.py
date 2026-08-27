@@ -24,7 +24,8 @@ REALIZED_WEATHER_SOURCES = {
     "open-meteo-archive", "open_meteo_archive", "realized", "reanalysis",
     "noaa-arl-ready", "noaa-ready-gfs0p25",
 }
-STRICT_WEATHER_SOURCE = "noaa-ncei-gfs-grid004-0p5"
+OBSOLETE_WEATHER_SOURCES = {"noaa-ncei-gfs-grid004-0p5", "noaa-ncei-gfs-0p25"}
+STRICT_WEATHER_SOURCE = "nsf-ncar-gdex-gfs-0p25"
 
 
 class StrictDataError(ValueError):
@@ -103,6 +104,8 @@ def select_weather_vintages(weather: pd.DataFrame, origins: pd.DataFrame) -> pd.
     out = weather.copy()
     if out["source"].astype(str).str.lower().isin(REALIZED_WEATHER_SOURCES).any():
         raise StrictDataError("strict mode forbids realized/archive/reanalysis weather fallback")
+    if out["source"].astype(str).str.lower().isin(OBSOLETE_WEATHER_SOURCES).any():
+        raise StrictDataError("strict mode rejects obsolete NCEI forecast sources")
     if not out["source"].astype(str).str.lower().eq(STRICT_WEATHER_SOURCE).all():
         raise StrictDataError(f"strict weather source must be {STRICT_WEATHER_SOURCE}")
     out["model_init_time_utc"] = _utc(out["model_init_time_utc"], "weather model_init_time_utc")
