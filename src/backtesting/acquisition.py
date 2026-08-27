@@ -53,7 +53,9 @@ def parse_gdex_name(name: str) -> dict[str, object]:
     except ValueError as exc:
         raise ValueError(f"invalid GDEX calendar cycle: {name}") from exc
     lead_hours = int(lead)
-    if lead_hours > 384 or (lead_hours <= 120 and lead_hours % 1) or (lead_hours > 120 and lead_hours % 3):
+    if (lead_hours > 384 or
+            (lead_hours <= 240 and lead_hours % 3) or
+            (lead_hours > 240 and lead_hours % 12)):
         raise ValueError(f"invalid GDEX forecast lead: {name}")
     return {"model_init_time_utc": init, "forecast_lead_hours": lead_hours,
             "valid_time_utc": init + pd.Timedelta(hours=lead_hours), "filename": filename}
