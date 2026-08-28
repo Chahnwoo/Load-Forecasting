@@ -1,14 +1,46 @@
 # Day-ahead evaluation audit
 
+> **Status (current strict workflow): remediated and validated.** This document
+> preserves the findings that motivated the redesign. Statements below about
+> “the repository” lacking origins, vintages, or strict features describe the
+> **legacy retrospective/monthly paths at the time of the audit**, not
+> `build_strict_backtest_dataset.py` and `scripts/evaluate_strict_tabular.py`.
+> The canonical current workflow and results are documented in [README.md](README.md).
+
+## Current validated state
+
+The remediation added a separate strict path rather than changing the semantics
+of legacy experiments. It now has one D-1 07:00 Pacific cutoff per operating
+day; archived GDEX GFS forecast vintages subject to the conservative
+`gfs_init_plus_10h_v1` availability policy; exact previous-week load with an
+availability proof; population-weighted stations; an explicit 13-feature
+allowlist; separately normalized CAISO DAM and ACTUAL products; and strict UTC
+key/coverage checks. October–November 2025 are the only training, CV, fitting,
+and calibration months. December is loaded only after the model is frozen.
+
+Raw GDEX acquisition now uses OPeNDAP DAS discovery and small NetCDF-3 NCSS
+subsets with SHA-256 sidecars and offline resume validation. December's 310
+weather subsets and 78 OASIS acquisitions have completed deep certification.
+Permanent read-only certification and paired operating-day analysis commands
+are `scripts.certify_strict_backtest` and `scripts.analyze_strict_predictions`.
+
+The remaining limitations are evidentiary rather than missing strict-path
+functionality: the result covers one held-out month after only two training
+months; five stations are a compact spatial representation; the +10-hour rule
+is a conservative repository policy rather than an authoritative publication
+timestamp; and the 95% interval for Ridge versus previous-week persistence
+crosses zero. The calibrated CAISO baselines are train-only robustness checks,
+not operational CAISO products.
+
 ## Scope and governing definition
 
 This audit treats the required product as a **single-origin, strict day-ahead forecast**: for each CAISO operating day `D`, one run at a configurable cutoff on `D-1` must freeze the information set and issue every interval of `D`. A feature is admissible only if its value (or the particular forecast vintage supplying it) was published no later than that cutoff. Merely having a source timestamp earlier than the target timestamp is not sufficient.
 
-The repository does not currently represent a forecast origin, cutoff, publication timestamp, weather-forecast vintage, or CAISO operating date in its model-ready data. Consequently, the existing monthly experiments cannot demonstrate this information constraint.
+At audit time, the legacy model-ready data did not represent a forecast origin, cutoff, publication timestamp, weather-forecast vintage, or CAISO operating date. Consequently, those monthly experiments cannot demonstrate this information constraint. The strict path described above now does.
 
-## Executive conclusion
+## Executive conclusion for the legacy evaluation
 
-The reported monthly metrics are **not valid strict day-ahead metrics**. The tabular models are retrospective fits evaluated with realized weather for the target hour. The sequence models are rolling one-hour-ahead-style evaluations whose input window advances through the validation month. GAM additionally constructs target-load lags and rolling means from validation-month actual load. The next-day path uses forecast weather, but it does not persist a forecast vintage/cutoff, does not enforce load-feature availability at that cutoff, and constructs sequence predictions using feature rows from within the day being forecast.
+The legacy reported monthly metrics are **not valid strict day-ahead metrics**. The tabular models are retrospective fits evaluated with realized weather for the target hour. The sequence models are rolling one-hour-ahead-style evaluations whose input window advances through the validation month. GAM additionally constructs target-load lags and rolling means from validation-month actual load. The legacy next-day path uses forecast weather, but it does not persist a forecast vintage/cutoff, does not enforce load-feature availability at that cutoff, and constructs sequence predictions using feature rows from within the day being forecast.
 
 No scaler leakage across the explicit monthly train/validation boundary was found in the main sklearn and Torch paths: the input preprocessor and Torch target scaler are fit on training rows only. That fact does not cure the more fundamental horizon and oracle-feature leakage.
 
@@ -171,7 +203,7 @@ Overlapping raw files are concatenated and the last duplicate `(region, time_utc
 
 **Existing metrics:** exact historical reproducibility and as-of validity are not guaranteed.
 
-## Required redesign and acceptance checks
+## Redesign acceptance checks (completed by the strict path)
 
 1. Define the target explicitly: TAC/system, units, interval start/end and final/revision policy. Prefer direct OASIS `SYS_FCST_ACT_MW` ingestion for a CAISO system benchmark.
 2. Represent `operating_day`, timezone-aware `forecast_cutoff`, feature `valid_time`, `issue_time`, `available_at`, source and vintage.
@@ -182,4 +214,4 @@ Overlapping raw files are concatenated and the last duplicate `(region, time_utc
 7. Score every model and CAISO DAM forecast against one exact actual table and identical `(target, interval_start_utc)` keys. Fail on duplicates, target mismatch, missing intervals or unequal actual values.
 8. Report aggregate and lead-hour metrics, the number of origins/intervals, missingness, vintage ages, and paired common-row comparisons.
 
-Until those checks pass, label existing results as retrospective experiments with realized weather (and, for sequence/GAM, rolling-horizon or leaked-load features), not strict day-ahead forecasts.
+These checks now pass for the dedicated strict Oct–Nov-to-Dec path. Legacy results must still be labeled retrospective experiments with realized weather (and, for sequence/GAM, rolling-horizon or leaked-load features), not strict day-ahead forecasts.
