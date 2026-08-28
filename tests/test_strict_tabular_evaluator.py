@@ -10,19 +10,31 @@ from scripts.evaluate_strict_tabular import (
     CAISO,
     EXPECTED_ROWS,
     FEATURE_ALLOWLIST,
+    RIDGE_ALPHAS,
     SEED,
     TARGET,
     TEST_MONTH,
     TRAIN_MONTHS,
+    XGBOOST_GRID,
     EvaluationDataError,
     _xgboost_model,
     cross_validate,
     feature_matrix,
+    fit_caiso_calibration,
     final_refit,
     load_strict_month,
     make_expanding_folds,
     make_pipeline,
+    score_december,
 )
+
+
+class FeatureEchoModel:
+    def __init__(self, offset):
+        self.offset = offset
+
+    def predict(self, features):
+        return features["load_previous_week"].to_numpy() + self.offset
 
 
 def frame(rows=1465, start="2025-10-01T07:00:00Z"):
@@ -56,6 +68,17 @@ class StrictTabularEvaluatorTests(unittest.TestCase):
         self.assertEqual(1465, sum(EXPECTED_ROWS[x] for x in TRAIN_MONTHS))
         self.assertEqual(744, EXPECTED_ROWS[TEST_MONTH])
 
+    def test_existing_hyperparameter_search_space_is_unchanged(self):
+        self.assertEqual((0.01, 0.1, 1.0, 10.0, 100.0, 1000.0), RIDGE_ALPHAS)
+        self.assertEqual([
+            (2, 0.03, 300, 8, 0.8, 0.8, 0.1, 10.0),
+            (2, 0.05, 200, 12, 0.9, 0.9, 1.0, 20.0),
+            (3, 0.03, 250, 12, 0.8, 0.8, 1.0, 20.0),
+        ], [tuple(parameters[key] for key in (
+            "max_depth", "learning_rate", "n_estimators", "min_child_weight",
+            "subsample", "colsample_bytree", "reg_alpha", "reg_lambda",
+        )) for parameters in XGBOOST_GRID])
+
     def test_folds_are_expanding_chronological_weeks(self):
         folds = make_expanding_folds(1465)
         self.assertEqual(3, len(folds))
@@ -79,6 +102,62 @@ class StrictTabularEvaluatorTests(unittest.TestCase):
         fitted = final_refit({"linear": make_pipeline(LinearRegression())}, frame())
         scaler = fitted["linear"].named_steps["preprocess"].named_transformers_["continuous"]
         self.assertEqual(1465, scaler.n_samples_seen_)
+
+    def test_caiso_calibrations_fit_exactly_october_november(self):
+        training = frame()
+        training[TARGET] = 125.0 + 0.8 * training[CAISO]
+        calibration = fit_caiso_calibration(training)
+        self.assertEqual(1465, calibration.training_row_count)
+        self.assertEqual(TRAIN_MONTHS, calibration.training_months)
+        self.assertAlmostEqual(125.0, calibration.intercept, places=7)
+        self.assertAlmostEqual(0.8, calibration.slope, places=12)
+        self.assertAlmostEqual(
+            float((training[CAISO] - training[TARGET]).mean()),
+            calibration.training_bias,
+        )
+
+    def test_calibrations_reject_december_rows(self):
+        december = frame(744, "2025-12-01T08:00:00Z")
+        with self.assertRaisesRegex(EvaluationDataError, "October-November"):
+            fit_caiso_calibration(december)
+
+    def test_december_uses_frozen_calibration_and_common_timestamps(self):
+        training = frame()
+        calibration = fit_caiso_calibration(training)
+        december = frame(744, "2025-12-01T08:00:00Z")
+        models = {name: FeatureEchoModel(offset) for name, offset in
+                  (("linear", 1), ("ridge", 2), ("xgboost", 3))}
+        predictions, metrics = score_december(december, models, calibration)
+
+        np.testing.assert_allclose(
+            december[CAISO] - calibration.training_bias,
+            predictions["caiso_bias_corrected_prediction"],
+        )
+        np.testing.assert_allclose(
+            calibration.intercept + calibration.slope * december[CAISO],
+            predictions["caiso_linearly_calibrated_prediction"],
+        )
+        self.assertEqual(744, predictions.time_utc.nunique())
+        self.assertTrue(all(predictions[column].notna().sum() == 744 for column in (
+            CAISO, "previous_week_prediction", "linear_prediction", "ridge_prediction",
+            "xgboost_prediction", "caiso_bias_corrected_prediction",
+            "caiso_linearly_calibrated_prediction",
+        )))
+        self.assertTrue({
+            "rmse_improvement_vs_raw_caiso_pct",
+            "rmse_improvement_vs_bias_corrected_caiso_pct",
+            "rmse_improvement_vs_linearly_calibrated_caiso_pct",
+        }.issubset(metrics.columns))
+
+        # Changing December labels changes scores, but cannot alter any frozen
+        # calibration or model prediction.
+        changed = december.copy()
+        changed[TARGET] += 100_000
+        changed_predictions, _ = score_december(changed, models, calibration)
+        prediction_columns = [column for column in predictions if column.endswith("prediction")]
+        pd.testing.assert_frame_equal(
+            predictions[prediction_columns], changed_predictions[prediction_columns]
+        )
 
     def test_duplicate_missing_and_misaligned_timestamps_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
