@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse, json, re, time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 import pandas as pd
 import requests
 from src.backtesting.acquisition import (GDEX_DATASET, GDEX_MODEL, GDEX_REFERENCE, GDEX_SOURCE,
@@ -134,11 +135,10 @@ def _opendap_metadata(session, endpoint, attempts=OPENDAP_METADATA_ATTEMPTS):
         return content
     raise AssertionError("unreachable OPeNDAP retry state")
 
-def discover_variables(session, name):
-    endpoint=_opendap_das_url(name)
-    variables=_das_variables(_opendap_metadata(session,endpoint))
+def _discover_variables(variables, source):
+    """Resolve the strict field contract from name/attribute metadata."""
     if not variables:
-        raise RuntimeError(f"OPeNDAP DAS yielded no metadata blocks; final request URL={endpoint}")
+        raise RuntimeError(f"{source} yielded no variable metadata")
     found={}
     for field, canonical in CANONICAL_VARIABLES.items():
         candidates=[name for name,_ in variables if name == canonical]
@@ -176,7 +176,57 @@ def discover_variables(session, name):
             detail=_diagnostic(variables,(parameter,level,process or ""))
             raise RuntimeError(f"OPeNDAP metadata expected one {field}, found {candidates}; candidates={detail}")
         found[field]=candidates[0]
-    return found, endpoint
+    return found
+
+def discover_variables(session, name):
+    endpoint=_opendap_das_url(name)
+    variables=_das_variables(_opendap_metadata(session,endpoint))
+    return _discover_variables(variables,f"OPeNDAP DAS {endpoint}"), endpoint
+
+def discover_variables_from_dataset(path):
+    """Discover the strict GFS fields using only a cached NetCDF subset."""
+    import xarray as xr
+    with xr.open_dataset(path,engine="scipy") as ds:
+        variables=[(name,dict(array.attrs)) for name,array in ds.data_vars.items()]
+    return _discover_variables(variables,f"cached NetCDF {path}")
+
+def _request_parameters(url, name):
+    """Validate a cached NCSS URL and recover its manifest parameters."""
+    parsed=urlsplit(url)
+    expected=urlsplit(gdex_ncss_url(name,["placeholder"],north=0,south=0,east=0,west=0)[0])
+    if (parsed.scheme,parsed.netloc,parsed.path)!=(expected.scheme,expected.netloc,expected.path) or parsed.fragment:
+        raise RuntimeError(f"cached NCSS request URL does not match backing object {name}: {url!r}")
+    try: query=parse_qs(parsed.query,keep_blank_values=True,strict_parsing=True)
+    except ValueError as exc: raise RuntimeError(f"cached NCSS request URL is malformed: {url!r}") from exc
+    if not query or any(len(values)!=1 for values in query.values()):
+        raise RuntimeError(f"cached NCSS request URL has missing or duplicate parameters: {url!r}")
+    required={"var","north","south","east","west","horizStride","accept","time","addLatLon"}
+    if set(query)!=required or any(not values[0] for values in query.values()):
+        raise RuntimeError(f"cached NCSS request URL has invalid parameters: {url!r}")
+    return {key:values[0] for key,values in query.items()}
+
+def cached_subset(path, name):
+    """Validate and describe an existing pair without any network access."""
+    sidecar=path.with_suffix(path.suffix+".provenance.json")
+    if not path.exists() and not sidecar.exists(): return None
+    if not path.exists() or not sidecar.exists():
+        raise RuntimeError(f"incomplete prior NCSS state: {path}")
+    try: meta=json.loads(sidecar.read_text())
+    except (OSError,json.JSONDecodeError) as exc:
+        raise RuntimeError(f"malformed NCSS subset provenance: {sidecar}") from exc
+    if not isinstance(meta,dict): raise RuntimeError(f"malformed NCSS subset provenance: {sidecar}")
+    url=meta.get("ncss_request_url"); checksum=meta.get("checksum"); retrieved=meta.get("retrieved_at_utc")
+    if not all(isinstance(value,str) and value for value in (url,checksum,retrieved)):
+        raise RuntimeError(f"malformed NCSS subset provenance: {sidecar}")
+    try: datetime.fromisoformat(retrieved.replace("Z","+00:00"))
+    except ValueError as exc: raise RuntimeError(f"malformed NCSS subset provenance: {sidecar}") from exc
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}",checksum) or checksum!=sha256_file(path):
+        raise RuntimeError(f"existing NCSS subset provenance mismatch: {path}")
+    params=_request_parameters(url,name)
+    variables=discover_variables_from_dataset(path)
+    if set(params["var"].split(","))!=set(variables.values()):
+        raise RuntimeError(f"cached NCSS request variables do not match local dataset: {path}")
+    return variables,url,params,retrieved,checksum
 
 def download(session,url,path,retries=4):
     sidecar=path.with_suffix(path.suffix+".provenance.json")
@@ -339,11 +389,17 @@ def main():
     with requests.Session() as session:
       pad=.15; bbox=dict(north=stations.latitude.max()+pad,south=stations.latitude.min()-pad,east=stations.longitude.max()+pad,west=stations.longitude.min()-pad)
       for name in objects:
-        # Statistical variable identifiers encode their product-specific interval,
-        # so discovery is deliberately repeated for every backing object.
-        variables,metadata_url=discover_variables(session,name)
-        parsed=parse_gdex_name(name); request_url,params=gdex_ncss_url(name,list(variables.values()),**bbox)
-        target=raw/(name+".nc"); retrieved=download(session,request_url,target); checksum=sha256_file(target)
+        parsed=parse_gdex_name(name); target=raw/(name+".nc")
+        cached=cached_subset(target,name)
+        # Statistical identifiers are product-specific. Fresh objects use DAS;
+        # cached objects resolve the identical contract from their local dataset.
+        if cached is None:
+          variables,metadata_url=discover_variables(session,name)
+          request_url,params=gdex_ncss_url(name,list(variables.values()),**bbox)
+          retrieved=download(session,request_url,target); checksum=sha256_file(target)
+        else:
+          variables,request_url,params,retrieved,checksum=cached
+          metadata_url=_opendap_das_url(name)
         for row in extract(target,variables,stations,parsed):
           row.update(source=GDEX_SOURCE,model=GDEX_MODEL,dataset=GDEX_DATASET,dataset_reference=GDEX_REFERENCE,
             backing_source_object=name,backing_fileserver_url=gdex_object_url(name),ncss_request_url=request_url,

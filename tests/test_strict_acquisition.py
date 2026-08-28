@@ -430,6 +430,51 @@ class StrictAcquisitionTests(unittest.TestCase):
             self.assertEqual(retrieved,gdex_script.download(session,url,path))
             session.get.assert_not_called()
 
+    def _cached_gdex_subset(self, directory):
+        name="gfs.0p25.2025113000.f030.grib2"
+        path=Path(directory)/(name+".nc")
+        attrs={
+            "cloud": {"Grib2_Parameter_Name":"Total cloud cover", "Grib2_Level_Desc":"Entire atmosphere",
+                      "Grib2_Statistical_Process_Type":"UnknownStatType--1"},
+            "rain": {"Grib2_Parameter_Name":"Total precipitation", "Grib2_Level_Desc":"Ground or water surface",
+                     "Grib2_Statistical_Process_Type":"Accumulation"},
+            "sun": {"Grib2_Parameter_Name":"Downward Short-Wave Radiation Flux",
+                    "Grib2_Level_Desc":"Ground or water surface", "Grib2_Statistical_Process_Type":"Average"},
+        }
+        variables={canonical:xr.DataArray([1.],dims=["x"]) for canonical in gdex_script.CANONICAL_VARIABLES.values()}
+        variables.update({key:xr.DataArray([1.],dims=["x"],attrs=value) for key,value in attrs.items()})
+        xr.Dataset(variables).to_netcdf(path,engine="scipy")
+        discovered=gdex_script.discover_variables_from_dataset(path)
+        url,params=gdex_ncss_url(name,list(discovered.values()),north=1,south=0,east=1,west=0)
+        retrieved="2025-12-02T00:00:00+00:00"
+        path.with_suffix(".nc.provenance.json").write_text(json.dumps({
+            "ncss_request_url":url,"retrieved_at_utc":retrieved,"checksum":sha256_file(path)}))
+        return name,path,discovered,url,params,retrieved
+
+    def test_cached_pair_is_discovered_and_validated_entirely_offline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name,path,expected,url,params,retrieved=self._cached_gdex_subset(directory)
+            session=mock.Mock()
+            found,actual_url,actual_params,actual_retrieved,checksum=gdex_script.cached_subset(path,name)
+            self.assertEqual(expected,found)
+            self.assertEqual((url,params,retrieved),(actual_url,actual_params,actual_retrieved))
+            self.assertEqual(sha256_file(path),checksum)
+            session.get.assert_not_called()
+
+    def test_cached_pair_checksum_mismatch_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name,path,*_=self._cached_gdex_subset(directory)
+            path.write_bytes(path.read_bytes()+b"corrupt")
+            with self.assertRaisesRegex(RuntimeError,"provenance mismatch"):
+                gdex_script.cached_subset(path,name)
+
+    def test_cached_pair_must_be_complete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            name,path,*_=self._cached_gdex_subset(directory)
+            path.with_suffix(".nc.provenance.json").unlink()
+            with self.assertRaisesRegex(RuntimeError,"incomplete prior NCSS state"):
+                gdex_script.cached_subset(path,name)
+
     def test_real_oasis_contract_filtering_and_provenance(self):
         fixture = pd.DataFrame({"INTERVALSTARTTIME_GMT": ["2025-12-01T08:00Z"] * 6,
                                 "INTERVALENDTIME_GMT": ["2025-12-01T09:00Z"] * 6,
