@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 import numpy as np
@@ -301,6 +302,67 @@ class StrictAcquisitionTests(unittest.TestCase):
         self.assertIn("content-type='text/plain'", message)
         self.assertIn("Format netCDF4 is not supported", message)
         self.assertIn("final request URL=https://fixture.example/final", message)
+
+    def _ncss_sequence(self, statuses):
+        responses=[self._ncss_response(
+            b"CDF\x01fixture" if status == 200 else f"error {status}".encode(),
+            "application/x-netcdf" if status == 200 else "text/plain", status)
+            for status in statuses]
+        class Session:
+            def __init__(self): self.calls=0
+            def get(inner, *args, **kwargs):
+                response=responses[inner.calls].get(*args, **kwargs)
+                inner.calls+=1
+                return response
+        return Session()
+
+    def test_ncss_transient_http_failures_are_retried(self):
+        for status in (404,503,429):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory, \
+                    mock.patch.object(gdex_script.time,"sleep") as sleep:
+                session=self._ncss_sequence([status,200])
+                path=Path(directory)/"subset.nc"
+                gdex_script.download(session,"https://fixture.example/request",path)
+                self.assertEqual(2,session.calls)
+                self.assertEqual(b"CDF\x01fixture",path.read_bytes())
+                sleep.assert_called_once_with(1)
+
+    def test_ncss_repeated_transient_failure_exhausts_retries_without_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(gdex_script.time,"sleep") as sleep:
+            session=self._ncss_sequence([503,503,503])
+            path=Path(directory)/"subset.nc"
+            with self.assertRaisesRegex(RuntimeError,"HTTP 503.*response body='error 503'.*final request URL"):
+                gdex_script.download(session,"https://fixture.example/request",path,retries=3)
+            self.assertEqual(3,session.calls)
+            self.assertEqual([mock.call(1),mock.call(2)],sleep.call_args_list)
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_suffix(".nc.provenance.json").exists())
+
+    def test_ncss_deterministic_http_400_fails_without_retry(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(gdex_script.time,"sleep") as sleep:
+            session=self._ncss_sequence([400])
+            path=Path(directory)/"subset.nc"
+            with self.assertRaisesRegex(RuntimeError,"HTTP 400"):
+                gdex_script.download(session,"https://fixture.example/request",path)
+            self.assertEqual(1,session.calls)
+            sleep.assert_not_called()
+            self.assertFalse(path.exists())
+            self.assertFalse(path.with_suffix(".nc.provenance.json").exists())
+
+    def test_ncss_matching_prior_subset_and_provenance_are_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"subset.nc"
+            path.write_bytes(b"CDF\x01fixture")
+            url="https://fixture.example/request"
+            retrieved="2025-12-01T00:00:00+00:00"
+            path.with_suffix(".nc.provenance.json").write_text(json.dumps({
+                "ncss_request_url":url,"retrieved_at_utc":retrieved,
+                "checksum":sha256_file(path)}))
+            session=mock.Mock()
+            self.assertEqual(retrieved,gdex_script.download(session,url,path))
+            session.get.assert_not_called()
 
     def test_real_oasis_contract_filtering_and_provenance(self):
         fixture = pd.DataFrame({"INTERVALSTARTTIME_GMT": ["2025-12-01T08:00Z"] * 6,

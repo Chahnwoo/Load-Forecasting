@@ -24,6 +24,9 @@ STATISTICAL_VARIABLES = {
 
 CLOUD_COVER_SEMANTICS = ("Total cloud cover", "Entire atmosphere", "UnknownStatType--1")
 
+TRANSIENT_NCSS_HTTP_STATUSES = {404, 408, 429, 500, 502, 503, 504}
+MAX_NCSS_RETRY_DELAY_SECONDS = 8
+
 def required_objects(month):
     names=set()
     for _, day in operating_intervals(month).groupby("operating_day"):
@@ -151,10 +154,17 @@ def download(session,url,path,retries=4):
             final_url=getattr(response,"url",None) or url
             if response.status_code != 200:
                 body=response.content.decode("utf-8",errors="replace")[:1000]
-                raise RuntimeError(
+                error=RuntimeError(
                     f"NCSS download failed: HTTP {response.status_code}; "
                     f"content-type={content_type!r}; response body={body!r}; "
                     f"final request URL={final_url}")
+                if response.status_code not in TRANSIENT_NCSS_HTTP_STATUSES or attempt+1==retries:
+                    raise error
+                retry_after=response.headers.get("retry-after")
+                try: delay=float(retry_after) if retry_after is not None else 2**attempt
+                except ValueError: delay=2**attempt
+                time.sleep(min(MAX_NCSS_RETRY_DELAY_SECONDS,max(0,delay)))
+                continue
             media_type=content_type.partition(";")[0].strip().lower()
             if media_type not in {"application/x-netcdf", "application/netcdf"}:
                 raise RuntimeError(
@@ -173,7 +183,7 @@ def download(session,url,path,retries=4):
             return retrieved
         except requests.RequestException:
             if attempt+1==retries: raise
-            time.sleep(2**attempt)
+            time.sleep(min(MAX_NCSS_RETRY_DELAY_SECONDS,2**attempt))
 
 def statistical_time_bounds(ds, data_array, parsed, field):
     """Return authoritative CF interval leads for one NCSS backing object."""
