@@ -86,6 +86,22 @@ class StrictAcquisitionTests(unittest.TestCase):
             def get(self, *args, **kwargs): return Response(content)
         return Session()
 
+    def _gdex_metadata_sequence(self, statuses, *, retry_after=None):
+        das=self._gdex_das()
+        class Response:
+            def __init__(self,status):
+                self.status_code=status
+                self.content=das if status == 200 else f"metadata error {status}".encode()
+                self.headers={"content-type":"text/plain"}
+                if retry_after is not None: self.headers["retry-after"]=retry_after
+                self.url="https://fixture.example/final.das"
+        class Session:
+            def __init__(self): self.calls=0
+            def get(inner,*args,**kwargs):
+                response=Response(statuses[inner.calls]); inner.calls+=1
+                return response
+        return Session()
+
     def _gdex_das(self):
         return (Path(__file__).parent / "fixtures/gdex_gfs_opendap.das").read_bytes()
 
@@ -98,6 +114,56 @@ class StrictAcquisitionTests(unittest.TestCase):
         self.assertEqual("u-component_of_wind_height_above_ground", found["u_wind_10m"])
         self.assertEqual("v-component_of_wind_height_above_ground", found["v_wind_10m"])
         self.assertTrue(endpoint.endswith("gfs.0p25.2025113000.f030.grib2.das"))
+
+    def test_opendap_transient_http_failures_are_retried(self):
+        for status in (500,404,429):
+            with self.subTest(status=status), mock.patch.object(gdex_script.time,"sleep") as sleep:
+                session=self._gdex_metadata_sequence([status,200])
+                found,_=gdex_script.discover_variables(
+                    session,"gfs.0p25.2025113000.f030.grib2")
+                self.assertEqual("Temperature_height_above_ground",found["temperature_2m"])
+                self.assertEqual(2,session.calls)
+                sleep.assert_called_once_with(1)
+
+    def test_opendap_transient_retry_exhaustion_is_bounded_and_diagnostic(self):
+        with mock.patch.object(gdex_script.time,"sleep") as sleep:
+            session=self._gdex_metadata_sequence([503]*5)
+            with self.assertRaises(RuntimeError) as raised:
+                gdex_script.discover_variables(
+                    session,"gfs.0p25.2025113000.f030.grib2")
+        self.assertEqual(5,session.calls)
+        self.assertEqual([mock.call(1),mock.call(2),mock.call(4),mock.call(8)],sleep.call_args_list)
+        message=str(raised.exception)
+        self.assertIn("HTTP 503",message)
+        self.assertIn("content-type='text/plain'",message)
+        self.assertIn("metadata error 503",message)
+        self.assertIn("final request URL=https://fixture.example/final.das",message)
+
+    def test_opendap_retry_after_is_capped(self):
+        with mock.patch.object(gdex_script.time,"sleep") as sleep:
+            session=self._gdex_metadata_sequence([429,200],retry_after="30")
+            gdex_script.discover_variables(session,"gfs.0p25.2025113000.f030.grib2")
+        sleep.assert_called_once_with(8)
+
+    def test_opendap_deterministic_http_400_fails_immediately(self):
+        with mock.patch.object(gdex_script.time,"sleep") as sleep:
+            session=self._gdex_metadata_sequence([400])
+            with self.assertRaisesRegex(RuntimeError,"HTTP 400.*metadata error 400"):
+                gdex_script.discover_variables(
+                    session,"gfs.0p25.2025113000.f030.grib2")
+        self.assertEqual(1,session.calls)
+        sleep.assert_not_called()
+
+    def test_opendap_rejects_empty_and_html_success_responses(self):
+        for content,content_type,message in (
+                (b"","text/plain","body is empty"),
+                (b"<html>service error</html>","text/html","response is HTML")):
+            response=mock.Mock(status_code=200,content=content,
+                               headers={"content-type":content_type},url="https://fixture.example/final.das")
+            session=mock.Mock(); session.get.return_value=response
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError,message):
+                gdex_script.discover_variables(
+                    session,"gfs.0p25.2025113000.f030.grib2")
 
     def test_grib_metadata_discovers_three_and_six_hour_shortwave(self):
         three, _ = gdex_script.discover_variables(

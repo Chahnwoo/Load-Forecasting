@@ -26,6 +26,7 @@ CLOUD_COVER_SEMANTICS = ("Total cloud cover", "Entire atmosphere", "UnknownStatT
 
 TRANSIENT_NCSS_HTTP_STATUSES = {404, 408, 429, 500, 502, 503, 504}
 MAX_NCSS_RETRY_DELAY_SECONDS = 8
+OPENDAP_METADATA_ATTEMPTS = 5
 
 def required_objects(month):
     names=set()
@@ -96,10 +97,48 @@ def _diagnostic(variables, terms):
                 "units":_metadata_value(attrs,"units")})
     return related[:20]
 
+def _opendap_metadata(session, endpoint, attempts=OPENDAP_METADATA_ATTEMPTS):
+    """Retrieve DAS bytes with bounded retries and actionable HTTP errors."""
+    for attempt in range(attempts):
+        try:
+            response=session.get(endpoint,timeout=(20,120))
+        except requests.RequestException:
+            if attempt+1 == attempts: raise
+            time.sleep(min(MAX_NCSS_RETRY_DELAY_SECONDS,2**attempt))
+            continue
+        status=getattr(response,"status_code",200)
+        headers=getattr(response,"headers",{})
+        content_type=headers.get("content-type","")
+        final_url=getattr(response,"url",None) or endpoint
+        content=response.content
+        if status != 200:
+            body=content.decode("utf-8",errors="replace")[:1000]
+            error=RuntimeError(
+                f"OPeNDAP metadata retrieval failed: HTTP {status}; "
+                f"content-type={content_type!r}; response body={body!r}; "
+                f"final request URL={final_url}")
+            if status not in TRANSIENT_NCSS_HTTP_STATUSES or attempt+1 == attempts:
+                raise error
+            retry_after=headers.get("retry-after")
+            try: delay=float(retry_after) if retry_after is not None else 2**attempt
+            except (TypeError,ValueError): delay=2**attempt
+            time.sleep(min(MAX_NCSS_RETRY_DELAY_SECONDS,max(0,delay)))
+            continue
+        if not content:
+            raise RuntimeError(f"OPeNDAP metadata response body is empty; final request URL={final_url}")
+        media_type=content_type.partition(";")[0].strip().lower()
+        if media_type in {"text/html","application/xhtml+xml"} or re.match(br"\s*<(?:!doctype\s+html|html)\b",content,re.I):
+            raise RuntimeError(
+                f"OPeNDAP metadata response is HTML; content-type={content_type!r}; "
+                f"final request URL={final_url}")
+        return content
+    raise AssertionError("unreachable OPeNDAP retry state")
+
 def discover_variables(session, name):
     endpoint=_opendap_das_url(name)
-    response=session.get(endpoint,timeout=(20,120)); response.raise_for_status()
-    variables=_das_variables(response.content)
+    variables=_das_variables(_opendap_metadata(session,endpoint))
+    if not variables:
+        raise RuntimeError(f"OPeNDAP DAS yielded no metadata blocks; final request URL={endpoint}")
     found={}
     for field, canonical in CANONICAL_VARIABLES.items():
         candidates=[name for name,_ in variables if name == canonical]
