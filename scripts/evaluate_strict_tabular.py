@@ -81,6 +81,49 @@ class TimeFold:
     validation_indices: np.ndarray
 
 
+@dataclass(frozen=True)
+class CaisoCalibration:
+    """Frozen CAISO-only parameters estimated from the training period."""
+
+    training_bias: float
+    intercept: float
+    slope: float
+    training_row_count: int
+    training_months: tuple[str, ...]
+
+
+def fit_caiso_calibration(training: pd.DataFrame) -> CaisoCalibration:
+    """Fit both CAISO calibrations using exactly October-November labels."""
+    required = {TIME, TARGET, CAISO}
+    if not required.issubset(training.columns):
+        raise EvaluationDataError(
+            f"calibration training data is missing columns: {sorted(required - set(training.columns))}"
+        )
+    times = pd.to_datetime(training[TIME], utc=True, errors="coerce")
+    pacific_months = tuple(sorted({
+        t.tz_convert("America/Los_Angeles").strftime("%Y-%m") for t in times
+        if not pd.isna(t)
+    }))
+    expected_count = sum(EXPECTED_ROWS[month] for month in TRAIN_MONTHS)
+    if (times.isna().any() or times.duplicated().any() or len(training) != expected_count
+            or pacific_months != TRAIN_MONTHS):
+        raise EvaluationDataError(
+            "CAISO calibration requires exactly the 1465 unique October-November rows"
+        )
+    actual = training[TARGET].to_numpy(dtype=float)
+    caiso = training[CAISO].to_numpy(dtype=float)
+    if not np.isfinite(actual).all() or not np.isfinite(caiso).all():
+        raise EvaluationDataError("CAISO calibration inputs must be finite")
+    fitted = LinearRegression().fit(caiso.reshape(-1, 1), actual)
+    return CaisoCalibration(
+        training_bias=float(np.mean(caiso - actual)),
+        intercept=float(fitted.intercept_),
+        slope=float(fitted.coef_[0]),
+        training_row_count=len(training),
+        training_months=TRAIN_MONTHS,
+    )
+
+
 def _read_csv(path: Path, product: str) -> pd.DataFrame:
     if not path.is_file():
         raise EvaluationDataError(f"missing {product}: {path}")
@@ -247,11 +290,20 @@ def _metrics(actual: np.ndarray, prediction: np.ndarray) -> dict[str, float]:
             "bias": float(np.mean(error))}
 
 
-def score_december(test: pd.DataFrame, models: dict[str, Pipeline]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def score_december(test: pd.DataFrame, models: dict[str, Pipeline],
+                   calibration: CaisoCalibration) -> tuple[pd.DataFrame, pd.DataFrame]:
     if len(test) != EXPECTED_ROWS[TEST_MONTH]:
         raise EvaluationDataError("December scoring requires exactly 744 aligned target rows")
     predictions = test[[TIME, TARGET, CAISO]].copy()
     predictions["previous_week_prediction"] = test["load_previous_week"].to_numpy()
+    # Only the already-frozen parameters are used here; December actuals are
+    # retained solely for scoring below.
+    predictions["caiso_bias_corrected_prediction"] = (
+        predictions[CAISO] - calibration.training_bias
+    )
+    predictions["caiso_linearly_calibrated_prediction"] = (
+        calibration.intercept + calibration.slope * predictions[CAISO]
+    )
     for name in ("linear", "ridge", "xgboost"):
         values = np.asarray(models[name].predict(feature_matrix(test)), dtype=float)
         if len(values) != 744 or not np.isfinite(values).all():
@@ -261,14 +313,24 @@ def score_december(test: pd.DataFrame, models: dict[str, Pipeline]) -> tuple[pd.
     method_columns = {
         "previous_week": "previous_week_prediction", "linear": "linear_prediction",
         "ridge": "ridge_prediction", "xgboost": "xgboost_prediction", "caiso_dam": CAISO,
+        "caiso_bias_corrected": "caiso_bias_corrected_prediction",
+        "caiso_linearly_calibrated": "caiso_linearly_calibrated_prediction",
     }
     metrics = [{"method": method, **_metrics(actual, predictions[column].to_numpy(dtype=float))}
                for method, column in method_columns.items()]
-    caiso_rmse = next(row["rmse"] for row in metrics if row["method"] == "caiso_dam")
+    baseline_names = {
+        "caiso_dam": "raw_caiso", "caiso_bias_corrected": "bias_corrected_caiso",
+        "caiso_linearly_calibrated": "linearly_calibrated_caiso",
+    }
+    baseline_rmse = {name: next(row["rmse"] for row in metrics if row["method"] == method)
+                     for method, name in baseline_names.items()}
     for row in metrics:
-        row["rmse_improvement_vs_caiso_pct"] = (
-            (caiso_rmse - row["rmse"]) / caiso_rmse * 100 if caiso_rmse else 0.0
-        )
+        for name, rmse in baseline_rmse.items():
+            row[f"rmse_improvement_vs_{name}_pct"] = (
+                (rmse - row["rmse"]) / rmse * 100 if rmse else 0.0
+            )
+        # Retain the original output field for downstream consumers.
+        row["rmse_improvement_vs_caiso_pct"] = row["rmse_improvement_vs_raw_caiso_pct"]
     return predictions, pd.DataFrame(metrics)
 
 
@@ -281,11 +343,12 @@ def evaluate(train_roots: list[Path], test_root: Path, output: Path) -> None:
     if len(training) != 1465 or training[TIME].duplicated().any():
         raise EvaluationDataError("October-November training data must have 1465 unique rows")
     models, selected, cv_results = select_models(training)
+    calibration = fit_caiso_calibration(training)
 
     # This ordering is part of the leakage barrier: December is not read until
     # selection and the all-training-row refit above have completed.
     test = load_strict_month(test_root, TEST_MONTH, EXPECTED_ROWS[TEST_MONTH])
-    predictions, metrics = score_december(test, models)
+    predictions, metrics = score_december(test, models, calibration)
     output.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(output / "predictions.csv", index=False)
     metrics.to_csv(output / "metrics.csv", index=False)
@@ -298,6 +361,11 @@ def evaluate(train_roots: list[Path], test_root: Path, output: Path) -> None:
     manifest = {
         "training_months": list(TRAIN_MONTHS), "test_month": TEST_MONTH,
         "training_row_count": len(training), "test_row_count": len(test),
+        "training_caiso_bias": calibration.training_bias,
+        "calibration_intercept": calibration.intercept,
+        "calibration_slope": calibration.slope,
+        "calibration_training_months": list(calibration.training_months),
+        "calibration_training_row_count": calibration.training_row_count,
         "selected_hyperparameters": selected, "random_seed": SEED,
         "library_versions": {"python": platform.python_version(), "numpy": np.__version__,
                              "pandas": pd.__version__, "scikit-learn": sklearn.__version__,
